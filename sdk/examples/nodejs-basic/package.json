@@ -1,0 +1,35 @@
+{
+  "name": "rdb-nodejs-example",
+  "version": "1.0.0",
+  "description": "Basic Node.js TypeScript example using @realdb/client SDK",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "npm run build && node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "demo": "ts-node src/demo.ts",
+    "crud": "ts-node src/crud-demo.ts",
+    "realtime": "ts-node src/realtime-demo.ts",
+    "batch": "ts-node src/batch-operations.ts",
+    "setup": "ts-node src/setup.ts",
+    "test": "ts-node src/test.ts"
+  },
+  "dependencies": {
+    "@realdb/client": "^1.1.0",
+    "dotenv": "^16.3.1",
+    "react": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.6.0"
+  },
+  "keywords": [
+    "rdb",
+    "example",
+    "nodejs",
+    "typescript"
+  ],
+  "author": "RDB Team",
+  "license": "MIT"
+}

@@ -98,22 +98,15 @@ async function processSchemaUpdate(bucketName: string, schemaKey: string): Promi
  */
 async function updateAppSyncSchema(schemaContent: string, config: any): Promise<void> {
   try {
-    // Start schema creation
-    const startResult = await appSync.send(new StartSchemaCreationCommand({
-      apiId: APPSYNC_API_ID,
-      definition: Buffer.from(schemaContent),
-    }));
+    console.log('Generic schema is used - no dynamic schema updates needed');
+    console.log('Creating/updating resolvers for table operations...');
 
-    console.log('Schema creation started:', startResult);
-
-    // Wait for schema creation to complete
-    await waitForSchemaCreation();
-
-    // Create or update resolvers for the tables
-    await createResolvers(config.tables);
+    // With generic schema, we only need to ensure resolvers are properly configured
+    // The schema itself never changes - it handles all table structures generically
+    await createGenericResolvers();
 
   } catch (error) {
-    console.error('Failed to update AppSync schema:', error);
+    console.error('Failed to update AppSync resolvers:', error);
     throw error;
   }
 }
@@ -153,30 +146,34 @@ async function waitForSchemaCreation(): Promise<void> {
 }
 
 /**
- * Create resolvers for table operations
+ * Create generic resolvers that work with any table structure
  */
-async function createResolvers(tables: any[]): Promise<void> {
-  for (const table of tables) {
-    const typeName = capitalize(table.tableName);
-    const dataSource = `rdb-data-${table.tableId}`;
+async function createGenericResolvers(): Promise<void> {
+  const dataSourceName = 'RdbGenericDataSource';
 
-    try {
-      // Create data source for the table if it doesn't exist
-      await createDataSource(table.tableId, dataSource);
+  try {
+    // Create a generic data source that can work with any table
+    await createGenericDataSource(dataSourceName);
 
-      // Create resolvers for queries
-      await createResolver(`Query`, `get${typeName}`, dataSource, 'get');
-      await createResolver(`Query`, `list${typeName}s`, dataSource, 'list');
+    // Create resolvers for generic operations
+    await createResolver('Query', 'getRecord', dataSourceName, 'getRecord');
+    await createResolver('Query', 'listRecords', dataSourceName, 'listRecords');
+    await createResolver('Query', 'getTable', dataSourceName, 'getTable');
+    await createResolver('Query', 'listTables', dataSourceName, 'listTables');
 
-      // Create resolvers for mutations
-      await createResolver(`Mutation`, `create${typeName}`, dataSource, 'create');
-      await createResolver(`Mutation`, `update${typeName}`, dataSource, 'update');
-      await createResolver(`Mutation`, `delete${typeName}`, dataSource, 'delete');
+    // Create resolvers for mutations
+    await createResolver('Mutation', 'createRecord', dataSourceName, 'createRecord');
+    await createResolver('Mutation', 'updateRecord', dataSourceName, 'updateRecord');
+    await createResolver('Mutation', 'deleteRecord', dataSourceName, 'deleteRecord');
+    await createResolver('Mutation', 'batchCreateRecords', dataSourceName, 'batchCreateRecords');
+    await createResolver('Mutation', 'batchUpdateRecords', dataSourceName, 'batchUpdateRecords');
+    await createResolver('Mutation', 'batchDeleteRecords', dataSourceName, 'batchDeleteRecords');
 
-    } catch (error) {
-      console.error(`Failed to create resolvers for table ${table.tableName}:`, error);
-      // Continue with other tables
-    }
+    console.log('Generic resolvers created successfully');
+
+  } catch (error) {
+    console.error('Failed to create generic resolvers:', error);
+    throw error;
   }
 }
 

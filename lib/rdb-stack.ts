@@ -87,7 +87,7 @@ export class RdbStack extends cdk.Stack {
 
     // Table management Lambda
     const tableManagementFunction = new NodejsFunction(this, 'TableManagementFunction', {
-      runtime: lambda.Runtime.NODEJS_18_X,
+      runtime: lambda.Runtime.NODEJS_20_X,
       entry: 'src/lambdas/table-management/index.ts',
       handler: 'handler',
       environment: {
@@ -100,7 +100,7 @@ export class RdbStack extends cdk.Stack {
 
     // Records management Lambda
     const recordsManagementFunction = new NodejsFunction(this, 'RecordsManagementFunction', {
-      runtime: lambda.Runtime.NODEJS_18_X,
+      runtime: lambda.Runtime.NODEJS_20_X,
       entry: 'src/lambdas/records-management/index.ts',
       handler: 'handler',
       environment: {
@@ -112,7 +112,7 @@ export class RdbStack extends cdk.Stack {
 
     // API key management Lambda
     const apiKeyManagementFunction = new NodejsFunction(this, 'ApiKeyManagementFunction', {
-      runtime: lambda.Runtime.NODEJS_18_X,
+      runtime: lambda.Runtime.NODEJS_20_X,
       entry: 'src/lambdas/api-key-management/index.ts',
       handler: 'handler',
       environment: {
@@ -124,7 +124,7 @@ export class RdbStack extends cdk.Stack {
 
     // AppSync schema synchronization Lambda
     const schemaSyncFunction = new NodejsFunction(this, 'SchemaSyncFunction', {
-      runtime: lambda.Runtime.NODEJS_18_X,
+      runtime: lambda.Runtime.NODEJS_20_X,
       entry: 'src/lambdas/schema-sync/index.ts',
       handler: 'handler',
       environment: {
@@ -136,7 +136,7 @@ export class RdbStack extends cdk.Stack {
 
     // Lambda authorizer for API Gateway
     const authorizerFunction = new NodejsFunction(this, 'AuthorizerFunction', {
-      runtime: lambda.Runtime.NODEJS_18_X,
+      runtime: lambda.Runtime.NODEJS_20_X,
       entry: 'src/lambdas/authorizer/index.ts',
       handler: 'handler',
       environment: {
@@ -148,6 +148,17 @@ export class RdbStack extends cdk.Stack {
         externalModules: ['aws-sdk'],
         minify: true,
       },
+    });
+
+    // SDK configuration Lambda
+    const sdkConfigFunction = new NodejsFunction(this, 'SdkConfigFunction', {
+      runtime: lambda.Runtime.NODEJS_20_X,
+      entry: 'src/lambdas/sdk-config/index.ts',
+      handler: 'handler',
+      environment: {
+        APPSYNC_API_ID: this.appSyncApi.apiId,
+      },
+      timeout: cdk.Duration.seconds(10),
     });
 
     // ========================================
@@ -192,6 +203,18 @@ export class RdbStack extends cdk.Stack {
 
     tableManagementFunction.addToRolePolicy(appSyncPolicy);
     schemaSyncFunction.addToRolePolicy(appSyncPolicy);
+
+    // Grant SDK config function permissions to read AppSync API keys
+    const appSyncReadPolicy = new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'appsync:ListApiKeys',
+        'appsync:GetGraphqlApi',
+      ],
+      resources: [this.appSyncApi.arn],
+    });
+
+    sdkConfigFunction.addToRolePolicy(appSyncReadPolicy);
 
     // ========================================
     // API GATEWAY
@@ -248,6 +271,13 @@ export class RdbStack extends cdk.Stack {
     // API key management (no auth required for key generation)
     const apiKeysResource = this.api.root.addResource('api-keys');
     apiKeysResource.addMethod('POST', new apigateway.LambdaIntegration(apiKeyManagementFunction));
+
+    // SDK configuration endpoint (requires authentication)
+    const sdkResource = this.api.root.addResource('sdk');
+    const configResource = sdkResource.addResource('config');
+    configResource.addMethod('GET', new apigateway.LambdaIntegration(sdkConfigFunction), {
+      authorizer,
+    });
 
     // ========================================
     // EVENT BRIDGE RULES
