@@ -1,4 +1,4 @@
-import { APIGatewayTokenAuthorizerEvent, APIGatewayAuthorizerResult, Context } from 'aws-lambda';
+import { APIGatewayTokenAuthorizerEvent, APIGatewayAuthorizerResult, Context, APIGatewayEvent } from 'aws-lambda';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { 
   DynamoDBDocumentClient, 
@@ -23,12 +23,12 @@ const SECRET_NAME = process.env.SECRET_NAME!;
  * Validates API keys and returns authorization policy
  */
 export const handler = async (
-  event: APIGatewayTokenAuthorizerEvent,
+  event: APIGatewayEvent & {methodArn: string},
   context: Context
 ): Promise<APIGatewayAuthorizerResult> => {
   console.log('Authorizer invoked for token validation');
 
-  const token = event.authorizationToken;
+  const token = event.requestContext.identity.apiKey;
   
   if (!token || !token.startsWith('rdb_')) {
     console.log('Invalid token format or missing token');

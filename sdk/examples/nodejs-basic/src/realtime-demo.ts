@@ -1,16 +1,9 @@
 import { config } from 'dotenv';
-import { RdbClient } from '@realdb/client';
+import { RdbClient, RdbTable } from '@realdb/client';
+import { MessageSchema, MessageWithMeta, TableNames } from './schemas';
 
 // Load environment variables
 config();
-
-interface Message {
-  id?: string;
-  userId: string;
-  content: string;
-  timestamp?: string;
-  channel: string;
-}
 
 async function realTimeDemo(): Promise<void> {
   console.log('🔴 RDB Real-time Subscriptions Demo');
@@ -47,17 +40,10 @@ async function setupMessagesTable(client: RdbClient): Promise<void> {
   console.log('📋 Setting up messages table...');
   
   try {
-    await client.createTable({
-      tableName: 'messages',
-      fields: [
-        { name: 'userId', type: 'String', required: true, indexed: true },
-        { name: 'content', type: 'String', required: true },
-        { name: 'channel', type: 'String', required: true, indexed: true },
-        { name: 'timestamp', type: 'String', required: false }
-      ],
-      description: 'Chat messages for real-time demo'
+    await client.createTableFromSchema(TableNames.messages, MessageSchema, {
+      description: 'Chat messages for real-time demo with Zod validation'
     });
-    console.log('✅ Messages table created');
+    console.log('✅ Messages table created from Zod schema');
   } catch (error: any) {
     if (error.message.includes('already exists')) {
       console.log('ℹ️  Messages table already exists');
@@ -68,8 +54,8 @@ async function setupMessagesTable(client: RdbClient): Promise<void> {
 }
 
 async function demonstrateSubscriptions(client: RdbClient): Promise<void> {
-  // Use typed table instance for better type safety
-  const messages = client.table<Message>('messages');
+  // Use schema-based table instance for validation and type safety
+  const messages = client.tableWithSchema(TableNames.messages, MessageSchema);
   
   console.log('\n🔊 Starting real-time subscriptions...');
   console.log('This demo will show you real-time data changes.\n');
@@ -77,8 +63,8 @@ async function demonstrateSubscriptions(client: RdbClient): Promise<void> {
   // Subscribe to real-time changes with full type safety
   console.log('📡 Subscribing to real-time message changes...');
   const subscription = await messages.subscribe({
-    onData: (message: Message) => {
-      // message is now fully typed as Message interface
+    onData: (message: MessageWithMeta) => {
+      // message is now fully typed as MessageWithMeta interface
       console.log('🔄 Message change detected:');
       console.log(`   ID: ${message.id}`);
       console.log(`   User: ${message.userId}`);
@@ -118,7 +104,7 @@ async function demonstrateSubscriptions(client: RdbClient): Promise<void> {
   }, 30000);
 }
 
-async function simulateActivity(messages: import('@realdb/client').RdbTable<Message>): Promise<void> {
+async function simulateActivity(messages: RdbTable<MessageWithMeta>): Promise<void> {
   const users = ['alice', 'bob', 'charlie', 'diana'];
   const channels = ['general', 'random', 'tech', 'announcements'];
   const sampleMessages = [
@@ -136,7 +122,7 @@ async function simulateActivity(messages: import('@realdb/client').RdbTable<Mess
 
   // Create initial messages
   for (let i = 0; i < 3; i++) {
-    const message: Message = {
+    const message: MessageWithMeta = {
       userId: users[Math.floor(Math.random() * users.length)],
       content: sampleMessages[Math.floor(Math.random() * sampleMessages.length)],
       channel: channels[Math.floor(Math.random() * channels.length)],
@@ -153,7 +139,7 @@ async function simulateActivity(messages: import('@realdb/client').RdbTable<Mess
       const messagesResponse = await messages.list({ limit: 1 });
       const messagesList = messagesResponse.data?.items || [];
       if (messagesList.length > 0) {
-        const messageToDelete = messagesList[0] as Message;
+        const messageToDelete = messagesList[0] as MessageWithMeta;
         if (messageToDelete.id) {
           await messages.delete(messageToDelete.id);
           console.log('🗑️  Deleted a message to demonstrate real-time updates');

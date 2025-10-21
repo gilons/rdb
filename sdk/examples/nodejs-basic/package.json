@@ -7,6 +7,7 @@
     "build": "tsc",
     "start": "npm run build && node dist/index.js",
     "dev": "ts-node src/index.ts",
+    "test:reset": "rm -f .test-state-*.json && npm run dev",
     "demo": "ts-node src/demo.ts",
     "crud": "ts-node src/crud-demo.ts",
     "realtime": "ts-node src/realtime-demo.ts",
@@ -15,7 +16,7 @@
     "test": "ts-node src/test.ts"
   },
   "dependencies": {
-    "@realdb/client": "^1.1.0",
+    "@realdb/client": "^1.2.1",
     "dotenv": "^16.3.1",
     "react": "^19.2.0"
   },

@@ -9,15 +9,22 @@ import {
   gql,
   Observable,
 } from '@apollo/client';
+import { z } from 'zod';
 import { 
   RdbConfig, 
   InternalConfig,
-  TableConfig, 
+  TableConfig,
+  TableField,
   QueryOptions,
   SubscriptionOptions,
   PaginatedResponse,
   ApiResponse
 } from './types';
+import { 
+  createTableConfigFromSchema, 
+  InferSchemaType,
+  inferSchemaFromTableMetadata
+} from './utils/zod-schema';
 
 // Apollo client instance - will be initialized per RDB client
 const apolloClientInstances = new Map<string, ApolloClient<any>>();
@@ -127,6 +134,8 @@ export class RdbClient {
 
     // Ensure we have the configuration
     await this.ensureConfig();
+
+    // https://github.com/awslabs/aws-mobile-appsync-sdk-js
     
     const { appSyncEndpoint, appSyncRegion, appSyncApiKey } = this.config;
 
@@ -200,6 +209,40 @@ export class RdbClient {
   }
 
   /**
+   * Get a table instance with Zod schema validation and automatic type inference
+   * @template T The Zod schema type
+   * @param tableName The name of the table
+   * @param schema The Zod schema for validation and type inference
+   * @returns A typed table instance with Zod validation
+   * 
+   * @example
+   * ```typescript
+   * import { z } from 'zod';
+   * 
+   * const UserSchema = z.object({
+   *   name: z.string().min(1),
+   *   email: z.string().email(),
+   *   age: z.number().int().min(0),
+   *   isActive: z.boolean().default(true)
+   * });
+   * 
+   * const users = client.tableWithSchema('users', UserSchema);
+   * // All operations are now typed and validated automatically
+   * const user = await users.create({ name: 'John', email: 'john@example.com', age: 30 });
+   * // user is typed as ApiResponse<InferSchemaType<typeof UserSchema>>
+   * ```
+   */
+  tableWithSchema<T extends z.ZodRawShape>(
+    tableName: string, 
+    schema: z.ZodObject<T>
+  ): RdbTable<InferSchemaType<z.ZodObject<T>>> {
+    const table = new RdbTable<InferSchemaType<z.ZodObject<T>>>(this, tableName);
+    // Add schema validation to the table instance
+    (table as any)._schema = schema;
+    return table;
+  }
+
+  /**
    * Create a new table
    */
   async createTable(config: TableConfig): Promise<ApiResponse> {
@@ -211,9 +254,49 @@ export class RdbClient {
         message: response.message,
         data: response.table
       };
-    } catch (error: any) {
-      throw new Error(`Failed to create table: ${error.response?.data?.error || error.message}`);
+    } catch (err: any) {
+      const error = await err.json()
+      throw new Error(`Failed to create table: ${JSON.stringify(error.response?.data?.error || error.message)}`);
     }
+  }
+
+  /**
+   * Create a new table from a Zod schema with automatic type inference
+   * @template T The Zod schema type
+   * @param tableName The name of the table to create
+   * @param schema The Zod schema defining the table structure
+   * @param options Additional options for table creation
+   * @returns Promise resolving to table creation result
+   * 
+   * @example
+   * ```typescript
+   * import { z } from 'zod';
+   * 
+   * const UserSchema = z.object({
+   *   name: z.string().min(1),
+   *   email: z.string().email(),
+   *   age: z.number().int().min(0),
+   *   isActive: z.boolean().default(true)
+   * });
+   * 
+   * const result = await client.createTableFromSchema('users', UserSchema, {
+   *   description: 'User management table'
+   * });
+   * ```
+   */
+  async createTableFromSchema<T extends z.ZodRawShape>(
+    tableName: string,
+    schema: z.ZodObject<T>,
+    options: {
+      description?: string;
+      subscriptions?: Array<{ 
+        event: 'create' | 'update' | 'delete' | 'change'; 
+        filters?: Array<{ field: string; type: string; operator?: 'eq' | 'ne' | 'gt' | 'lt' | 'gte' | 'lte' | 'contains'; value?: any }> 
+      }>;
+    } = {}
+  ): Promise<ApiResponse> {
+    const tableConfig = createTableConfigFromSchema(tableName, schema, options);
+    return this.createTable(tableConfig);
   }
 
   /**
@@ -289,6 +372,108 @@ export class RdbClient {
   }
 
   /**
+   * Get detailed table metadata including field definitions and types
+   * @param tableName The name of the table to get metadata for
+   * @returns Promise resolving to table metadata with field information
+   * 
+   * @example
+   * ```typescript
+   * const metadata = await client.getTableMetadata('users');
+   * console.log('Table fields:', metadata.fields);
+   * ```
+   */
+  async getTableMetadata(tableName: string): Promise<{
+    tableName: string;
+    fields: TableField[];
+    description?: string;
+  }> {
+    try {
+      // First try to get from the listTables response which includes full metadata
+      const tablesResponse = await this.listTables();
+      if (tablesResponse.success && tablesResponse.data?.items) {
+        const table = tablesResponse.data.items.find(t => t.tableName === tableName);
+        if (table) {
+          return {
+            tableName: table.tableName,
+            fields: table.fields,
+            description: table.description
+          };
+        }
+      }
+      
+      // Fallback to individual table schema endpoint
+      const schemaResponse = await this.getTableSchema(tableName);
+      
+      // Convert the simplified schema format to TableField format
+      const fields: TableField[] = Object.entries(schemaResponse.fields).map(([name, type]) => ({
+        name,
+        type: type as any, // Type assertion since we know the backend types
+        required: true, // Default assumption
+        indexed: false, // Default assumption
+        primary: name === 'id'
+      }));
+      
+      return {
+        tableName,
+        fields,
+        description: `Table: ${tableName}`
+      };
+    } catch (error: any) {
+      throw new Error(`Failed to get table metadata: ${error.response?.data?.error || error.message}`);
+    }
+  }
+
+  /**
+   * Automatically infer a Zod schema from an existing table's metadata
+   * This enables reading from tables with automatic type safety
+   * @param tableName The name of the table to infer schema from
+   * @returns Promise resolving to an inferred Zod schema and table information
+   * 
+   * @example
+   * ```typescript
+   * // Automatically infer schema from existing table
+   * const { schema, tableName: name } = await client.inferTableSchema('users');
+   * 
+   * // Use the inferred schema to create a typed table instance
+   * const users = client.tableWithSchema(name, schema);
+   * 
+   * // Now you have full type safety and validation
+   * const usersList = await users.list();
+   * ```
+   */
+  async inferTableSchema(tableName: string): Promise<{
+    schema: z.ZodObject<any>;
+    tableName: string;
+    description?: string;
+  }> {
+    const metadata = await this.getTableMetadata(tableName);
+    return inferSchemaFromTableMetadata(metadata);
+  }
+
+  /**
+   * Create a typed table instance with automatic schema inference from existing table
+   * This is a convenience method that combines getTableMetadata and tableWithSchema
+   * @param tableName The name of the existing table
+   * @returns A typed table instance with inferred schema and validation
+   * 
+   * @example
+   * ```typescript
+   * // Automatically create typed table from existing table
+   * const users = await client.tableWithInferredSchema('users');
+   * 
+   * // Full type safety without manually defining schemas
+   * const newUser = await users.create({
+   *   name: 'John Doe',
+   *   email: 'john@example.com'
+   * }); // Automatic validation based on existing table structure
+   * ```
+   */
+  async tableWithInferredSchema(tableName: string): Promise<RdbTable<any>> {
+    const { schema } = await this.inferTableSchema(tableName);
+    return this.tableWithSchema(tableName, schema);
+  }
+
+  /**
    * Internal method to get API client
    */
   getApiClient(): KyInstance {
@@ -342,6 +527,15 @@ export class RdbTable<T = any> {
    */
   async create(data: Omit<T, 'id' | 'createdAt' | 'updatedAt'>): Promise<ApiResponse<T>> {
     try {
+      // If this table has a schema attached, validate the data
+      if ((this as any)._schema) {
+        try {
+          (this as any)._schema.parse(data);
+        } catch (validationError: any) {
+          throw new Error(`Validation failed: ${validationError.message}`);
+        }
+      }
+
       // Backend returns { success: true, message: string, data: record }
       const response = await this.client.getApiClient()
         .post(`tables/${this.tableName}/records`, { json: data })
@@ -666,3 +860,26 @@ export async function createApiKey(
     throw new Error(`Failed to create API key: ${error.message}`);
   }
 }
+
+// Export types and utilities for external use
+export type { 
+  RdbConfig, 
+  TableConfig, 
+  QueryOptions, 
+  SubscriptionOptions, 
+  PaginatedResponse, 
+  ApiResponse,
+  TableField
+} from './types';
+
+export {
+  zodSchemaToFields,
+  createTableConfigFromSchema,
+  validateDataWithSchema,
+  validatePartialDataWithSchema
+} from './utils/zod-schema';
+
+export type { InferSchemaType } from './utils/zod-schema';
+
+// Re-export Zod for consistent version usage
+export { z } from 'zod';

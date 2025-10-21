@@ -84,20 +84,20 @@ export const handler = async (
         if (pathParameters?.tableName) {
           // Check if it's a schema request
           if (event.path?.endsWith('/schema')) {
-            return await getTableSchema(apiKey, pathParameters.tableName);
+            return await getTableSchema(apiKeyHash, pathParameters.tableName);
           }
           // Get individual table details
-          return await getTableDetails(apiKey, pathParameters.tableName);
+          return await getTableDetails(apiKeyHash, pathParameters.tableName);
         } else {
           // List all tables
-          return await listTables(apiKey);
+          return await listTables(apiKeyHash);
         }
       case 'POST':
-        return await createTable(apiKey, JSON.parse(body || '{}'));
+        return await createTable(apiKeyHash, JSON.parse(body || '{}'));
       case 'PUT':
-        return await updateTable(apiKey, pathParameters?.tableName, JSON.parse(body || '{}'));
+        return await updateTable(apiKeyHash, pathParameters?.tableName, JSON.parse(body || '{}'));
       case 'DELETE':
-        return await deleteTable(apiKey, pathParameters?.tableName);
+        return await deleteTable(apiKeyHash, pathParameters?.tableName);
       default:
         return {
           statusCode: 405,
@@ -121,12 +121,12 @@ export const handler = async (
 /**
  * List all tables for an API key
  */
-async function listTables(apiKey: string): Promise<APIGatewayProxyResult> {
+async function listTables(apiKey: string): Promise<APIGatewayProxyResult> {  
   const params = {
     TableName: TABLES_TABLE_NAME,
     KeyConditionExpression: 'apiKey = :apiKey',
     ExpressionAttributeValues: {
-      ':apiKey': apiKey,
+      ':apiKey': apiKey, // Use hash instead of raw API key
     },
   };
 
@@ -167,9 +167,8 @@ async function createTable(apiKey: string, tableConfig: TableConfig): Promise<AP
 
   const tableId = uuidv4();
   const timestamp = new Date().toISOString();
-
   const tableItem: TableItem = {
-    apiKey,
+    apiKey: apiKey, // Use hash instead of raw API key
     tableName,
     tableId,
     fields: fields.map(field => ({

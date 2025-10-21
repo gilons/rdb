@@ -1,4 +1,4 @@
-import { S3Event, Context } from 'aws-lambda';
+import { EventBridgeEvent, Context } from 'aws-lambda';
 import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { 
   AppSyncClient, 
@@ -16,23 +16,46 @@ const appSync = new AppSyncClient({ region: process.env.AWS_REGION || 'us-east-1
 const CONFIG_BUCKET_NAME = process.env.CONFIG_BUCKET_NAME!;
 const APPSYNC_API_ID = process.env.APPSYNC_API_ID!;
 
+interface S3EventDetail {
+  version: string;
+  bucket: {
+    name: string;
+  };
+  object: {
+    key: string;
+    size: number;
+    etag: string;
+  };
+  'request-id': string;
+  requester: string;
+  'source-ip-address': string;
+  reason: string;
+}
+
 /**
  * Lambda handler for AppSync schema synchronization
- * Triggered by S3 events when schema configurations are updated
+ * Triggered by EventBridge events when S3 schema configurations are updated
  */
-export const handler = async (event: S3Event, context: Context): Promise<void> => {
+export const handler = async (event: EventBridgeEvent<string, S3EventDetail>, context: Context): Promise<void> => {
   console.log('Schema sync event:', JSON.stringify(event, null, 2));
 
   try {
-    for (const record of event.Records) {
-      if (record.eventName?.startsWith('ObjectCreated') || record.eventName?.startsWith('ObjectRemoved')) {
-        const bucketName = record.s3.bucket.name;
-        const objectKey = record.s3.object.key;
+    // Check if this is an S3 object creation event
+    if (event.source === 'aws.s3' && 
+        (event['detail-type'] === 'Object Created' || event['detail-type'] === 'Object Removed')) {
+      
+      const bucketName = event.detail.bucket.name;
+      const objectKey = event.detail.object.key;
 
-        if (objectKey.startsWith('schemas/') && objectKey.endsWith('/schema.graphql')) {
-          await processSchemaUpdate(bucketName, objectKey);
-        }
+      // Only process schema files
+      if (objectKey.startsWith('schemas/') && objectKey.endsWith('/schema.graphql')) {
+        console.log(`Processing schema update for: ${objectKey}`);
+        await processSchemaUpdate(bucketName, objectKey);
+      } else {
+        console.log(`Skipping non-schema file: ${objectKey}`);
       }
+    } else {
+      console.log(`Skipping non-S3 or non-relevant event: ${event.source} - ${event['detail-type']}`);
     }
   } catch (error) {
     console.error('Error processing schema sync:', error);
@@ -98,15 +121,22 @@ async function processSchemaUpdate(bucketName: string, schemaKey: string): Promi
  */
 async function updateAppSyncSchema(schemaContent: string, config: any): Promise<void> {
   try {
-    console.log('Generic schema is used - no dynamic schema updates needed');
-    console.log('Creating/updating resolvers for table operations...');
+    // Start schema creation
+    const startResult = await appSync.send(new StartSchemaCreationCommand({
+      apiId: APPSYNC_API_ID,
+      definition: Buffer.from(schemaContent),
+    }));
 
-    // With generic schema, we only need to ensure resolvers are properly configured
-    // The schema itself never changes - it handles all table structures generically
-    await createGenericResolvers();
+    console.log('Schema creation started:', startResult);
+
+    // Wait for schema creation to complete
+    await waitForSchemaCreation();
+
+    // Create or update resolvers for the tables
+    await createResolvers(config.tables);
 
   } catch (error) {
-    console.error('Failed to update AppSync resolvers:', error);
+    console.error('Failed to update AppSync schema:', error);
     throw error;
   }
 }
@@ -146,34 +176,30 @@ async function waitForSchemaCreation(): Promise<void> {
 }
 
 /**
- * Create generic resolvers that work with any table structure
+ * Create resolvers for table operations
  */
-async function createGenericResolvers(): Promise<void> {
-  const dataSourceName = 'RdbGenericDataSource';
+async function createResolvers(tables: any[]): Promise<void> {
+  for (const table of tables) {
+    const typeName = capitalize(table.tableName);
+    const dataSource = `rdb-data-${table.tableId}`;
 
-  try {
-    // Create a generic data source that can work with any table
-    await createGenericDataSource(dataSourceName);
+    try {
+      // Create data source for the table if it doesn't exist
+      await createDataSource(table.tableId, dataSource);
 
-    // Create resolvers for generic operations
-    await createResolver('Query', 'getRecord', dataSourceName, 'getRecord');
-    await createResolver('Query', 'listRecords', dataSourceName, 'listRecords');
-    await createResolver('Query', 'getTable', dataSourceName, 'getTable');
-    await createResolver('Query', 'listTables', dataSourceName, 'listTables');
+      // Create resolvers for queries
+      await createResolver(`Query`, `get${typeName}`, dataSource, 'get');
+      await createResolver(`Query`, `list${typeName}s`, dataSource, 'list');
 
-    // Create resolvers for mutations
-    await createResolver('Mutation', 'createRecord', dataSourceName, 'createRecord');
-    await createResolver('Mutation', 'updateRecord', dataSourceName, 'updateRecord');
-    await createResolver('Mutation', 'deleteRecord', dataSourceName, 'deleteRecord');
-    await createResolver('Mutation', 'batchCreateRecords', dataSourceName, 'batchCreateRecords');
-    await createResolver('Mutation', 'batchUpdateRecords', dataSourceName, 'batchUpdateRecords');
-    await createResolver('Mutation', 'batchDeleteRecords', dataSourceName, 'batchDeleteRecords');
+      // Create resolvers for mutations
+      await createResolver(`Mutation`, `create${typeName}`, dataSource, 'create');
+      await createResolver(`Mutation`, `update${typeName}`, dataSource, 'update');
+      await createResolver(`Mutation`, `delete${typeName}`, dataSource, 'delete');
 
-    console.log('Generic resolvers created successfully');
-
-  } catch (error) {
-    console.error('Failed to create generic resolvers:', error);
-    throw error;
+    } catch (error) {
+      console.error(`Failed to create resolvers for table ${table.tableName}:`, error);
+      // Continue with other tables
+    }
   }
 }
 

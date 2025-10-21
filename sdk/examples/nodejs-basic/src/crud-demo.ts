@@ -1,20 +1,9 @@
 import { config } from 'dotenv';
 import { RdbClient } from '@realdb/client';
+import { TodoSchema, TodoWithMeta, TableNames } from './schemas';
 
 // Load environment variables
 config();
-
-interface Todo {
-  id?: string;
-  title: string;
-  description?: string;
-  completed: boolean;
-  priority: 'low' | 'medium' | 'high';
-  dueDate?: string;
-  tags?: string[];
-  createdAt?: string;
-  updatedAt?: string;
-}
 
 async function crudDemo(): Promise<void> {
   console.log('💾 RDB CRUD Operations Demo');
@@ -55,19 +44,10 @@ async function setupTodosTable(client: RdbClient): Promise<void> {
   console.log('📋 Setting up todos table...');
   
   try {
-    await client.createTable({
-      tableName: 'todos',
-      fields: [
-        { name: 'title', type: 'String', required: true },
-        { name: 'description', type: 'String', required: false },
-        { name: 'completed', type: 'Boolean', required: true },
-        { name: 'priority', type: 'String', required: true, indexed: true },
-        { name: 'dueDate', type: 'String', required: false, indexed: true },
-        { name: 'tags', type: 'Array', required: false }
-      ],
-      description: 'Todo list for CRUD demonstration'
+    await client.createTableFromSchema(TableNames.todos, TodoSchema, {
+      description: 'Todo list for CRUD demonstration with Zod validation'
     });
-    console.log('✅ Todos table created');
+    console.log('✅ Todos table created from Zod schema');
   } catch (error: any) {
     if (error.message.includes('already exists')) {
       console.log('ℹ️  Todos table already exists');
@@ -81,12 +61,12 @@ async function demonstrateCreateOperations(client: RdbClient): Promise<string[]>
   console.log('\n📝 CREATE Operations');
   console.log('--------------------');
 
-  // Use typed table instance for better IntelliSense and type safety
-  const todos = client.table<Todo>('todos');
+  // Use schema-based table instance for validation and type safety
+  const todos = client.tableWithSchema(TableNames.todos, TodoSchema);
   const createdIds: string[] = [];
 
-  // Create individual todos
-  console.log('Creating individual todos...');
+  // Create individual todos with automatic validation
+  console.log('Creating individual todos with Zod validation...');
 
   const todo1Response = await todos.create({
     title: 'Learn RDB SDK',
@@ -96,7 +76,7 @@ async function demonstrateCreateOperations(client: RdbClient): Promise<string[]>
     dueDate: '2024-01-15',
     tags: ['learning', 'development']
   });
-  const todo1 = todo1Response.data as Todo;
+  const todo1 = todo1Response.data as TodoWithMeta;
   if (todo1?.id) createdIds.push(todo1.id);
   console.log(`✅ Created: "${todo1?.title || 'Todo'}" (ID: ${todo1?.id})`);
 
@@ -108,7 +88,7 @@ async function demonstrateCreateOperations(client: RdbClient): Promise<string[]>
     dueDate: '2024-01-20',
     tags: ['testing', 'quality']
   });
-  const todo2 = todo2Response.data as Todo;
+  const todo2 = todo2Response.data as TodoWithMeta;
   if (todo2?.id) createdIds.push(todo2.id);
   console.log(`✅ Created: "${todo2?.title || 'Todo'}" (ID: ${todo2?.id})`);
 
@@ -119,7 +99,7 @@ async function demonstrateCreateOperations(client: RdbClient): Promise<string[]>
     priority: 'low',
     tags: ['deployment']
   });
-  const todo3 = todo3Response.data as Todo;
+  const todo3 = todo3Response.data as TodoWithMeta;
   if (todo3?.id) createdIds.push(todo3.id);
   console.log(`✅ Created: "${todo3?.title || 'Todo'}" (ID: ${todo3?.id})`);
 
@@ -142,12 +122,25 @@ async function demonstrateCreateOperations(client: RdbClient): Promise<string[]>
 
   for (const todoData of moreTodos) {
     const response = await todos.create(todoData);
-    const todo = response.data as Todo;
+    const todo = response.data as TodoWithMeta;
     if (todo?.id) createdIds.push(todo.id);
     console.log(`✅ Created: "${todo?.title || 'Todo'}" (ID: ${todo?.id})`);
   }
 
   console.log(`\n📊 Created ${createdIds.length} todos total`);
+  
+  // Demonstrate validation
+  console.log('\n🛡️  Testing Zod validation...');
+  try {
+    await todos.create({
+      title: '', // Invalid - empty title
+      priority: 'invalid' as any, // Invalid priority
+      completed: false
+    });
+  } catch (error) {
+    console.log('✅ Validation caught invalid data:', (error as Error).message);
+  }
+  
   return createdIds;
 }
 
@@ -155,7 +148,7 @@ async function demonstrateReadOperations(client: RdbClient): Promise<void> {
   console.log('\n📖 READ Operations');
   console.log('------------------');
 
-  const todos = client.table<Todo>('todos');
+  const todos = client.tableWithSchema(TableNames.todos, TodoSchema);
 
   // Get all todos (with pagination)
   console.log('Fetching todos...');
@@ -166,7 +159,7 @@ async function demonstrateReadOperations(client: RdbClient): Promise<void> {
   // Display some todos
   if (allTodos.length > 0) {
     console.log('\n📝 Sample todos:');
-    allTodos.slice(0, 5).forEach((todo: Todo, index: number) => {
+    allTodos.slice(0, 5).forEach((todo: TodoWithMeta, index: number) => {
       console.log(`   ${index + 1}. ${todo.title} (${todo.priority}) - ${todo.completed ? '✅' : '⏳'}`);
     });
   }
@@ -180,14 +173,14 @@ async function demonstrateDeleteOperations(client: RdbClient): Promise<void> {
   console.log('\n🗑️  DELETE Operations');
   console.log('--------------------');
 
-  const todos = client.table<Todo>('todos');
+  const todos = client.tableWithSchema(TableNames.todos, TodoSchema);
 
   // Get some todos to delete
   const todosResponse = await todos.list({ limit: 5 });
   const todosList = todosResponse.data?.items || [];
 
   if (todosList.length > 0) {
-    const todoToDelete = todosList[0] as Todo;
+    const todoToDelete = todosList[0] as TodoWithMeta;
     console.log(`Deleting todo: "${todoToDelete.title}"...`);
     
     try {
@@ -199,7 +192,7 @@ async function demonstrateDeleteOperations(client: RdbClient): Promise<void> {
 
     // Delete one more if available
     if (todosList.length > 1) {
-      const secondTodo = todosList[1] as Todo;
+      const secondTodo = todosList[1] as TodoWithMeta;
       console.log(`\nDeleting another todo: "${secondTodo.title}"...`);
       
       try {

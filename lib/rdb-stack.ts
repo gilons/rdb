@@ -87,7 +87,7 @@ export class RdbStack extends cdk.Stack {
 
     // Table management Lambda
     const tableManagementFunction = new NodejsFunction(this, 'TableManagementFunction', {
-      runtime: lambda.Runtime.NODEJS_20_X,
+      runtime: lambda.Runtime.NODEJS_18_X,
       entry: 'src/lambdas/table-management/index.ts',
       handler: 'handler',
       environment: {
@@ -95,12 +95,15 @@ export class RdbStack extends cdk.Stack {
         CONFIG_BUCKET_NAME: this.configBucket.bucketName,
         APPSYNC_API_ID: this.appSyncApi.apiId,
       },
-      timeout: cdk.Duration.seconds(30)
+      timeout: cdk.Duration.seconds(30),
+      bundling: {
+        forceDockerBundling: false,
+      }
     });
 
     // Records management Lambda
     const recordsManagementFunction = new NodejsFunction(this, 'RecordsManagementFunction', {
-      runtime: lambda.Runtime.NODEJS_20_X,
+      runtime: lambda.Runtime.NODEJS_18_X,
       entry: 'src/lambdas/records-management/index.ts',
       handler: 'handler',
       environment: {
@@ -108,11 +111,14 @@ export class RdbStack extends cdk.Stack {
         APPSYNC_API_ID: this.appSyncApi.apiId,
       },
       timeout: cdk.Duration.seconds(30),
+      bundling: {
+        forceDockerBundling: false,
+      }
     });
 
     // API key management Lambda
     const apiKeyManagementFunction = new NodejsFunction(this, 'ApiKeyManagementFunction', {
-      runtime: lambda.Runtime.NODEJS_20_X,
+      runtime: lambda.Runtime.NODEJS_18_X,
       entry: 'src/lambdas/api-key-management/index.ts',
       handler: 'handler',
       environment: {
@@ -120,11 +126,14 @@ export class RdbStack extends cdk.Stack {
         SECRET_NAME: apiKeySecret.secretName,
       },
       timeout: cdk.Duration.seconds(30),
+      bundling: {
+        forceDockerBundling: false,
+      }
     });
 
     // AppSync schema synchronization Lambda
     const schemaSyncFunction = new NodejsFunction(this, 'SchemaSyncFunction', {
-      runtime: lambda.Runtime.NODEJS_20_X,
+      runtime: lambda.Runtime.NODEJS_18_X,
       entry: 'src/lambdas/schema-sync/index.ts',
       handler: 'handler',
       environment: {
@@ -132,11 +141,14 @@ export class RdbStack extends cdk.Stack {
         APPSYNC_API_ID: this.appSyncApi.apiId,
       },
       timeout: cdk.Duration.minutes(5),
+      bundling: {
+        forceDockerBundling: false,
+      }
     });
 
     // Lambda authorizer for API Gateway
     const authorizerFunction = new NodejsFunction(this, 'AuthorizerFunction', {
-      runtime: lambda.Runtime.NODEJS_20_X,
+      runtime: lambda.Runtime.NODEJS_18_X,
       entry: 'src/lambdas/authorizer/index.ts',
       handler: 'handler',
       environment: {
@@ -145,20 +157,22 @@ export class RdbStack extends cdk.Stack {
       },
       timeout: cdk.Duration.seconds(10),
       bundling: {
-        externalModules: ['aws-sdk'],
-        minify: true,
-      },
+        forceDockerBundling: false,
+      }
     });
 
     // SDK configuration Lambda
     const sdkConfigFunction = new NodejsFunction(this, 'SdkConfigFunction', {
-      runtime: lambda.Runtime.NODEJS_20_X,
+      runtime: lambda.Runtime.NODEJS_18_X,
       entry: 'src/lambdas/sdk-config/index.ts',
       handler: 'handler',
       environment: {
         APPSYNC_API_ID: this.appSyncApi.apiId,
       },
       timeout: cdk.Duration.seconds(10),
+      bundling: {
+        forceDockerBundling: false,
+      }
     });
 
     // ========================================
@@ -169,7 +183,38 @@ export class RdbStack extends cdk.Stack {
     tablesTable.grantReadWriteData(tableManagementFunction);
     tablesTable.grantReadData(recordsManagementFunction);
     apiKeysTable.grantReadWriteData(apiKeyManagementFunction);
-    apiKeysTable.grantReadData(authorizerFunction);
+    apiKeysTable.grantReadWriteData(authorizerFunction); // Changed to ReadWrite for timestamp updates
+
+    // Grant additional DynamoDB permissions for table management
+    const dynamoDbPolicy = new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'dynamodb:CreateTable',
+        'dynamodb:DeleteTable',
+        'dynamodb:DescribeTable',
+        'dynamodb:ListTables',
+        'dynamodb:UpdateTable',
+        'dynamodb:TagResource',
+        'dynamodb:UntagResource',
+        'dynamodb:ListTagsOfResource',
+        // User data table permissions (for tables created by the API)
+        'dynamodb:PutItem',
+        'dynamodb:GetItem',
+        'dynamodb:UpdateItem',
+        'dynamodb:DeleteItem',
+        'dynamodb:Query',
+        'dynamodb:Scan',
+        'dynamodb:BatchGetItem',
+        'dynamodb:BatchWriteItem'
+      ],
+      resources: [
+        `arn:aws:dynamodb:${this.region}:${this.account}:table/rdb-data-*`,
+        `arn:aws:dynamodb:${this.region}:${this.account}:table/rdb-data-*/index/*`
+      ]
+    });
+
+    tableManagementFunction.addToRolePolicy(dynamoDbPolicy);
+    recordsManagementFunction.addToRolePolicy(dynamoDbPolicy);
 
     // Grant S3 permissions
     this.configBucket.grantReadWrite(tableManagementFunction);
@@ -299,7 +344,9 @@ export class RdbStack extends cdk.Stack {
       },
     });
 
-    s3ConfigChangeRule.addTarget(new targets.LambdaFunction(schemaSyncFunction));
+    s3ConfigChangeRule.addTarget(new targets.LambdaFunction(schemaSyncFunction, {
+      retryAttempts: 2
+    }));
 
     // ========================================
     // OUTPUTS

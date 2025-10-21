@@ -1,0 +1,38 @@
+{
+  "currentStep": 2,
+  "completedSteps": [
+    "client-init",
+    "list-tables"
+  ],
+  "failedSteps": [
+    "create-users-table"
+  ],
+  "startTime": "2025-10-21T10:12:32.865Z",
+  "lastRunTime": "2025-10-21T10:12:39.057Z",
+  "totalSteps": 7,
+  "results": {
+    "client-init": {
+      "success": true,
+      "result": {
+        "status": "initialized",
+        "endpoint": "https://om4u1v09h9.execute-api.us-east-1.amazonaws.com/prod"
+      },
+      "duration": 0,
+      "timestamp": "2025-10-21T10:12:32.866Z"
+    },
+    "list-tables": {
+      "success": true,
+      "result": {
+        "count": 0,
+        "tables": []
+      },
+      "duration": 1189,
+      "timestamp": "2025-10-21T10:12:39.057Z"
+    },
+    "create-users-table": {
+      "success": false,
+      "error": "Failed to create table: 403 Forbidden: [object ReadableStream]",
+      "timestamp": "2025-10-21T10:12:45.004Z"
+    }
+  }
+}

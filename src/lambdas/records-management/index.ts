@@ -80,7 +80,7 @@ export const handler = async (
 
   try {
     // Verify table exists and get table info
-    const tableInfo = await getTableInfo(apiKey, tableName);
+    const tableInfo = await getTableInfo(apiKeyHash, tableName);
     if (!tableInfo) {
       return {
         statusCode: 404,
