@@ -7,8 +7,8 @@
   "failedSteps": [
     "create-users-table"
   ],
-  "startTime": "2025-10-21T10:12:32.865Z",
-  "lastRunTime": "2025-10-21T10:12:39.057Z",
+  "startTime": "2025-10-22T05:35:02.603Z",
+  "lastRunTime": "2025-10-22T05:35:08.537Z",
   "totalSteps": 7,
   "results": {
     "client-init": {
@@ -17,8 +17,8 @@
         "status": "initialized",
         "endpoint": "https://om4u1v09h9.execute-api.us-east-1.amazonaws.com/prod"
       },
-      "duration": 0,
-      "timestamp": "2025-10-21T10:12:32.866Z"
+      "duration": 1,
+      "timestamp": "2025-10-22T05:35:02.606Z"
     },
     "list-tables": {
       "success": true,
@@ -26,13 +26,13 @@
         "count": 0,
         "tables": []
       },
-      "duration": 1189,
-      "timestamp": "2025-10-21T10:12:39.057Z"
+      "duration": 928,
+      "timestamp": "2025-10-22T05:35:08.537Z"
     },
     "create-users-table": {
       "success": false,
       "error": "Failed to create table: 403 Forbidden: [object ReadableStream]",
-      "timestamp": "2025-10-21T10:12:45.004Z"
+      "timestamp": "2025-10-22T05:35:14.087Z"
     }
   }
 }

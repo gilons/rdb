@@ -168,12 +168,12 @@ async function createSampleTables(): Promise<void> {
         await client.createTable(tableConfig);
         console.log(`✅ Created table: ${tableConfig.tableName}`);
         created++;
-      } catch (error: any) {
-        if (error.message.includes('already exists')) {
+      } catch (err: any) {
+        if (err.message.includes('already exists')) {
           console.log(`ℹ️  Table already exists: ${tableConfig.tableName}`);
           skipped++;
         } else {
-          console.error(`❌ Failed to create table ${tableConfig.tableName}:`, error.message);
+          console.error(`❌ Failed to create table ${tableConfig.tableName}:`, err.message);
         }
       }
     }
