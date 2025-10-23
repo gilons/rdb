@@ -49,8 +49,8 @@ export const handler = async (
 ): Promise<APIGatewayProxyResult> => {
   console.log('Event received for records management operation');
 
-  const { httpMethod, pathParameters, body, requestContext, queryStringParameters } = event;
-  const apiKey = (requestContext as any)?.authorizer?.apiKey;
+  const { httpMethod, headers, pathParameters, body, requestContext, queryStringParameters } = event;
+  const apiKey = headers['X-Api-Key'] || (requestContext as any)?.authorizer?.apiKey;
   const tableName = pathParameters?.tableName;
 
   if (!apiKey) {

@@ -44,11 +44,13 @@ interface TableConfig {
   fields: TableField[];
   subscriptions?: TableSubscription[];
   description?: string;
+  graphqlTypeName?: string;
 }
 
 interface TableItem extends TableConfig {
   apiKey: string;
   tableId: string;
+  graphqlTypeName: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -62,9 +64,10 @@ export const handler = async (
   context: Context
 ): Promise<APIGatewayProxyResult> => {
   console.log('Event received for table management operation');
+  console.warn('Event:', JSON.stringify(event, null, 2));
 
-  const { httpMethod, pathParameters, body, requestContext } = event;
-  const apiKey = (requestContext as any)?.authorizer?.apiKey;
+  const { httpMethod, headers, pathParameters, body, requestContext } = event;
+  const apiKey = headers['X-Api-Key'] || (requestContext as any)?.authorizer?.apiKey;
 
   if (!apiKey) {
     return {
@@ -167,6 +170,10 @@ async function createTable(apiKey: string, tableConfig: TableConfig): Promise<AP
 
   const tableId = uuidv4();
   const timestamp = new Date().toISOString();
+  
+  // Generate GraphQL type name with prefix
+  const graphqlTypeName = `T${apiKey}_${tableName}`;
+  
   const tableItem: TableItem = {
     apiKey: apiKey, // Use hash instead of raw API key
     tableName,
@@ -180,6 +187,7 @@ async function createTable(apiKey: string, tableConfig: TableConfig): Promise<AP
     })),
     subscriptions: subscriptions || [],
     description: description || '',
+    graphqlTypeName, // Store the GraphQL type name for SDK usage
     createdAt: timestamp,
     updatedAt: timestamp,
   };
@@ -236,9 +244,13 @@ async function updateTable(
 
   const timestamp = new Date().toISOString();
   
-  let updateExpression = 'SET updatedAt = :updatedAt';
+  // Regenerate GraphQL type name to ensure consistency
+  const graphqlTypeName = `T${apiKey}_${tableName}`;
+  
+  let updateExpression = 'SET updatedAt = :updatedAt, graphqlTypeName = :graphqlTypeName';
   const expressionAttributeValues: any = {
     ':updatedAt': timestamp,
+    ':graphqlTypeName': graphqlTypeName,
   };
 
   if (updates.fields) {
@@ -400,10 +412,9 @@ async function generateAndStoreSchema(apiKey: string): Promise<void> {
   const tables = (tablesResult.Items || []) as TableItem[];
   const schema = generateGraphQLSchema(tables);
 
-  const apiKeyHash = getApiKeyHash(apiKey);
   
   // Store schema in S3 (use hash for path to avoid key exposure)
-  const schemaKey = `schemas/${apiKeyHash}/schema.graphql`;
+  const schemaKey = `schemas/${apiKey}/schema.graphql`;
   await s3.send(new PutObjectCommand({
     Bucket: CONFIG_BUCKET_NAME,
     Key: schemaKey,
@@ -411,11 +422,17 @@ async function generateAndStoreSchema(apiKey: string): Promise<void> {
     ContentType: 'text/plain',
   }));
 
+  // Generate subscription queries for each table for client use
+  const tablesWithSubscriptionQueries = tables.map(table => ({
+    ...table,
+    subscriptionQueries: generateSubscriptionQueries(table, apiKey)
+  }));
+
   // Store table configurations for resolver generation (sanitize API key in config)
-  const configKey = `schemas/${apiKeyHash}/config.json`;
+  const configKey = `schemas/${apiKey}/config.json`;
   const sanitizedConfig = {
-    tables,
-    apiKeyHash, // Store hash instead of raw key
+    tables: tablesWithSubscriptionQueries,
+    apiKey, // Store hash instead of raw key
     timestamp: new Date().toISOString()
   };
   await s3.send(new PutObjectCommand({
@@ -430,78 +447,29 @@ async function generateAndStoreSchema(apiKey: string): Promise<void> {
  * Generate GraphQL schema from table definitions
  */
 function generateGraphQLSchema(tables: TableItem[]): string {
-  let schema = `
+  if (tables.length === 0) {
+    // Return minimal valid schema if no tables exist
+    return `
 type Query {
   placeholder: String
-`;
+}
 
-  let mutations = `
 type Mutation {
-  placeholder: String
-`;
+  placeholder: String  
+}
 
-  let subscriptions = `
 type Subscription {
   placeholder: String
+}
 `;
+  }
 
   let types = '';
+  let queries = '';
+  let mutations = '';
+  let subscriptions = '';
 
-  tables.forEach(table => {
-    const { tableName, fields, subscriptions: tableSubscriptions } = table;
-    const typeName = capitalize(tableName);
-
-    // Generate type definition
-    types += `
-type ${typeName} {
-  ${fields.map(field => `${field.name}: ${getGraphQLType(field.type)}`).join('\n  ')}
-}
-
-input ${typeName}Input {
-  ${fields.map(field => `${field.name}: ${getGraphQLType(field.type)}`).join('\n  ')}
-}
-
-input ${typeName}UpdateInput {
-  ${fields.map(field => `${field.name}: ${getGraphQLType(field.type)}`).join('\n  ')}
-}
-`;
-
-    // Generate queries
-    schema += `
-  get${typeName}(${fields[0].name}: ${getGraphQLType(fields[0].type)}!): ${typeName}
-  list${typeName}s(limit: Int, nextToken: String): ${typeName}Connection
-`;
-
-    // Generate mutations
-    mutations += `
-  create${typeName}(input: ${typeName}Input!): ${typeName}
-  update${typeName}(${fields[0].name}: ${getGraphQLType(fields[0].type)}!, input: ${typeName}UpdateInput!): ${typeName}
-  delete${typeName}(${fields[0].name}: ${getGraphQLType(fields[0].type)}!): ${typeName}
-`;
-
-    // Generate subscriptions based on table configuration
-    if (tableSubscriptions && tableSubscriptions.length > 0) {
-      tableSubscriptions.forEach(sub => {
-        subscriptions += `
-  on${typeName}${capitalize(sub.event || 'Change')}(${sub.filters ? sub.filters.map(f => `${f.field}: ${getGraphQLType(f.type)}`).join(', ') : ''}): ${typeName}
-    @aws_subscribe(mutations: ["create${typeName}", "update${typeName}", "delete${typeName}"])
-`;
-      });
-    }
-  });
-
-  schema += `
-}
-`;
-
-  mutations += `
-}
-`;
-
-  subscriptions += `
-}
-`;
-
+  // Generate connection types first
   types += `
 type Connection {
   items: [String]
@@ -509,18 +477,88 @@ type Connection {
 }
 `;
 
-  // Add connection types for each table
   tables.forEach(table => {
-    const typeName = capitalize(table.tableName);
+    const { tableName, fields, subscriptions: tableSubscriptions } = table;
+    const typeName = capitalize(tableName);
+    
+    // Ensure we have valid fields
+    if (!fields || fields.length === 0) return;
+
+    // Add ID field if not present
+    const allFields = [...fields];
+    if (!allFields.find(f => f.name === 'id')) {
+      allFields.unshift({ name: 'id', type: 'String', required: true, primary: true });
+    }
+
+    // Generate type definition
+    types += `
+type ${typeName} {
+  ${allFields.map(field => `${field.name}: ${getGraphQLType(field.type)}${field.required ? '!' : ''}`).join('\n  ')}
+  createdAt: String
+  updatedAt: String
+}
+`;
+
+    // Generate input types
+    types += `
+input ${typeName}Input {
+  ${allFields.filter(f => !f.primary).map(field => `${field.name}: ${getGraphQLType(field.type)}`).join('\n  ')}
+}
+`;
+
+    types += `
+input ${typeName}UpdateInput {
+  ${allFields.filter(f => !f.primary).map(field => `${field.name}: ${getGraphQLType(field.type)}`).join('\n  ')}
+}
+`;
+
+    // Generate connection type
     types += `
 type ${typeName}Connection {
   items: [${typeName}]
   nextToken: String
 }
 `;
+
+    // Find primary key field
+    const primaryField = allFields.find(f => f.primary) || allFields[0];
+
+    // Generate queries
+    queries += `
+  get${typeName}(${primaryField.name}: ${getGraphQLType(primaryField.type)}!): ${typeName}
+  list${typeName}(limit: Int, nextToken: String): ${typeName}Connection`;
+
+    // Generate mutations  
+    mutations += `
+  create${typeName}(input: ${typeName}Input!): ${typeName}
+  update${typeName}(${primaryField.name}: ${getGraphQLType(primaryField.type)}!, input: ${typeName}UpdateInput!): ${typeName}
+  delete${typeName}(${primaryField.name}: ${getGraphQLType(primaryField.type)}!): ${typeName}`;
+
+    // Generate subscriptions based on table configuration
+    if (tableSubscriptions && tableSubscriptions.length > 0) {
+      tableSubscriptions.forEach(sub => {
+        const eventName = capitalize(sub.event || 'change');
+        const filterParams = sub.filters ? 
+          sub.filters.map(f => `${f.field}: ${getGraphQLType(f.type)}`).join(', ') : '';
+        
+        subscriptions += `
+  on${typeName}${eventName}${filterParams ? `(${filterParams})` : ''}: ${typeName}
+    @aws_subscribe(mutations: ["create${typeName}", "update${typeName}", "delete${typeName}"])`;
+      });
+    }
   });
 
-  return `${types}${schema}${mutations}${subscriptions}`;
+  // Build final schema
+  return `${types}
+type Query {${queries || '\n  placeholder: String'}
+}
+
+type Mutation {${mutations || '\n  placeholder: String'}  
+}
+
+type Subscription {${subscriptions || '\n  placeholder: String'}
+}
+`;
 }
 
 /**
@@ -614,6 +652,71 @@ async function getTableSchema(apiKey: string, tableName: string): Promise<APIGat
       body: JSON.stringify({ error: 'Failed to get table schema' }),
     };
   }
+}
+
+/**
+ * Generate subscription queries for a table with prefixed names
+ * These queries will be used by the client SDK for real-time subscriptions
+ */
+function generateSubscriptionQueries(table: TableItem, apiKey: string): Record<string, string> {
+  // GraphQL type names cannot start with numbers, so prefix with 'T'
+  const prefixedTableName = `T${apiKey}_${table.tableName}`;
+  const typeName = capitalize(prefixedTableName);
+  const subscriptionQueries: Record<string, string> = {};
+
+  // Get all fields for the subscription query
+  const allFields = [...table.fields];
+  if (!allFields.find(f => f.name === 'id')) {
+    allFields.unshift({ name: 'id', type: 'String', required: true, primary: true });
+  }
+
+  // Build field selection for subscription
+  const fieldSelection = allFields.map(f => f.name).join('\n    ');
+
+  // Generate subscription queries based on table configuration
+  if (table.subscriptions && table.subscriptions.length > 0) {
+    table.subscriptions.forEach(sub => {
+      const eventName = capitalize(sub.event || 'change');
+      const subscriptionName = `on${typeName}${eventName}`;
+      
+      // Build filter arguments if any
+      let filterArgs = '';
+      let filterVariables = '';
+      if (sub.filters && sub.filters.length > 0) {
+        const filterParams = sub.filters.map(f => `$${f.field}: ${getGraphQLType(f.type)}`).join(', ');
+        const filterArgs2 = sub.filters.map(f => `${f.field}: $${f.field}`).join(', ');
+        filterVariables = `(${filterParams})`;
+        filterArgs = `(${filterArgs2})`;
+      }
+
+      // Generate the GraphQL subscription query
+      subscriptionQueries[sub.event] = `
+subscription ${subscriptionName}${filterVariables} {
+  ${subscriptionName}${filterArgs} {
+    ${fieldSelection}
+    createdAt
+    updatedAt
+  }
+}`.trim();
+    });
+  } else {
+    // Generate default subscriptions
+    ['Create', 'Update', 'Delete', 'Change'].forEach(eventName => {
+      const subscriptionName = `on${typeName}${eventName}`;
+      const eventKey = eventName.toLowerCase();
+      
+      subscriptionQueries[eventKey] = `
+subscription ${subscriptionName} {
+  ${subscriptionName} {
+    ${fieldSelection}
+    createdAt
+    updatedAt
+  }
+}`.trim();
+    });
+  }
+
+  return subscriptionQueries;
 }
 
 /**

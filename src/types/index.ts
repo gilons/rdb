@@ -21,11 +21,13 @@ export interface TableConfig {
   fields: TableField[];
   subscriptions?: TableSubscription[];
   description?: string;
+  graphqlTypeName?: string;
 }
 
 export interface TableItem extends TableConfig {
   apiKey: string;
   tableId: string;
+  graphqlTypeName: string;
   createdAt: string;
   updatedAt: string;
 }

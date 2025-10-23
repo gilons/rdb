@@ -1,5 +1,5 @@
 import { EventBridgeEvent, Context } from 'aws-lambda';
-import { S3Client, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, GetObjectCommand, PutObjectCommand, ListObjectsV2Command, ListObjectsV2CommandOutput } from '@aws-sdk/client-s3';
 import { 
   AppSyncClient, 
   StartSchemaCreationCommand, 
@@ -45,7 +45,7 @@ export const handler = async (event: EventBridgeEvent<string, S3EventDetail>, co
         (event['detail-type'] === 'Object Created' || event['detail-type'] === 'Object Removed')) {
       
       const bucketName = event.detail.bucket.name;
-      const objectKey = event.detail.object.key;
+      let objectKey = event.detail.object.key;
 
       // Only process schema files
       if (objectKey.startsWith('schemas/') && objectKey.endsWith('/schema.graphql')) {
@@ -75,8 +75,8 @@ async function processSchemaUpdate(bucketName: string, schemaKey: string): Promi
       return;
     }
 
-    const apiKeyOrHash = pathParts[1];
-    const apiKeyHash = getApiKeyHash(apiKeyOrHash);
+    // The path is schemas/{apiKeyHash}/schema.graphql, so pathParts[1] is already the hash
+    const apiKeyHash = pathParts[1];
     console.log('Processing schema update for API key hash:', apiKeyHash);
 
     // Get the schema content from S3
@@ -93,7 +93,7 @@ async function processSchemaUpdate(bucketName: string, schemaKey: string): Promi
     const schemaContent = await schemaObject.Body.transformToString();
 
     // Get the table configuration
-    const configKey = `schemas/${apiKeyOrHash}/config.json`;
+    const configKey = `schemas/${apiKeyHash}/config.json`;
     const configObject = await s3.send(new GetObjectCommand({
       Bucket: bucketName,
       Key: configKey,
@@ -105,9 +105,11 @@ async function processSchemaUpdate(bucketName: string, schemaKey: string): Promi
     }
 
     const config = JSON.parse(await configObject.Body.transformToString());
+    // Add apiKey hash to config for resolver creation
+    config.apiKey = apiKeyHash;
 
     // Update AppSync schema
-    await updateAppSyncSchema(schemaContent, config);
+    await updateAppSyncSchema(apiKeyHash, config);
 
     console.log('Schema updated successfully for API key hash:', apiKeyHash);
   } catch (error) {
@@ -117,14 +119,19 @@ async function processSchemaUpdate(bucketName: string, schemaKey: string): Promi
 }
 
 /**
- * Update AppSync GraphQL schema
+ * Update AppSync GraphQL schema by merging all schemas
  */
-async function updateAppSyncSchema(schemaContent: string, config: any): Promise<void> {
+async function updateAppSyncSchema(apiKeyHash: string, config: any): Promise<void> {
   try {
-    // Start schema creation
+    // Get all schemas from all API keys and merge them
+    const unifiedSchema = await buildUnifiedSchema();
+
+    console.log('Generated unified schema:', unifiedSchema);
+
+    // Start schema creation with unified schema
     const startResult = await appSync.send(new StartSchemaCreationCommand({
       apiId: APPSYNC_API_ID,
-      definition: Buffer.from(schemaContent),
+      definition: Buffer.from(unifiedSchema),
     }));
 
     console.log('Schema creation started:', startResult);
@@ -132,12 +139,247 @@ async function updateAppSyncSchema(schemaContent: string, config: any): Promise<
     // Wait for schema creation to complete
     await waitForSchemaCreation();
 
-    // Create or update resolvers for the tables
-    await createResolvers(config.tables);
+    // Only create/update resolvers for the specific API key that was modified
+    console.log(`Creating resolvers for apiKeyHash: ${apiKeyHash}, tables:`, JSON.stringify(config.tables, null, 2));
+    await createResolversForApiKey(config.tables, apiKeyHash);
 
   } catch (error) {
     console.error('Failed to update AppSync schema:', error);
     throw error;
+  }
+}
+
+/**
+ * Build unified schema from all API key schemas
+ */
+async function buildUnifiedSchema(): Promise<string> {
+  try {
+    // List objects with schemas/ prefix to find all API key directories
+    const listParams = {
+      Bucket: CONFIG_BUCKET_NAME,
+      Prefix: 'schemas/',
+      Delimiter: '/'
+    };
+
+    const listResult: ListObjectsV2CommandOutput = await s3.send(new ListObjectsV2Command(listParams));
+    const { CommonPrefixes } = listResult;
+    
+    const allTypes: string[] = [];
+    const allInputs: string[] = [];
+    const allQueries: string[] = [];
+    const allMutations: string[] = [];
+    const allSubscriptions: string[] = [];
+    
+    if (CommonPrefixes) {
+      for (const prefix of CommonPrefixes) {
+        if (!prefix.Prefix) continue;
+        
+        const apiKeyHash = prefix.Prefix.replace('schemas/', '').replace('/', '');
+        if (!apiKeyHash) continue;
+
+        try {
+          // Get config for this API key
+          const configKey = `schemas/${apiKeyHash}/config.json`;
+          const configObject = await s3.send(new GetObjectCommand({
+            Bucket: CONFIG_BUCKET_NAME,
+            Key: configKey,
+          }));
+
+          if (!configObject.Body) continue;
+          
+          const config = JSON.parse(await configObject.Body.transformToString());
+          
+          // Generate schema parts for each table
+          for (const table of config.tables) {
+            console.log(`Generating schema for table: ${table.tableName}, API key hash: ${apiKeyHash}`);
+            
+            // Generate types, inputs, queries, mutations, subscriptions
+            const { types, inputs, queries, mutations, subscriptions } = generateSchemaPartsForTable(table, apiKeyHash);
+            
+            console.log(`Generated queries for ${table.tableName}:`, queries);
+            
+            allTypes.push(...types);
+            allInputs.push(...inputs);
+            allQueries.push(...queries);
+            allMutations.push(...mutations);
+            allSubscriptions.push(...subscriptions);
+          }
+        } catch (error) {
+          console.warn(`Failed to process schema for API key ${apiKeyHash}:`, error);
+          // Continue with other API keys
+        }
+      }
+    }
+
+    // Build the unified schema
+    const unifiedSchema = `
+# RDB Unified GraphQL Schema
+# Auto-generated from all table schemas
+
+${allTypes.join('\n\n')}
+
+${allInputs.join('\n\n')}
+
+type Connection {
+  items: [String]
+  nextToken: String
+}
+
+type Query {
+  placeholder: String
+  ${allQueries.join('\n  ')}
+}
+
+type Mutation {
+  placeholder: String
+  ${allMutations.join('\n  ')}
+}
+
+type Subscription {
+  placeholder: String
+  ${allSubscriptions.join('\n  ')}
+}
+`;
+
+    return unifiedSchema;
+    
+  } catch (error) {
+    console.error('Failed to build unified schema:', error);
+    throw error;
+  }
+}
+
+/**
+ * Generate schema parts for a single table
+ */
+function generateSchemaPartsForTable(table: any, apiKeyHash: string): {
+  types: string[];
+  inputs: string[];
+  queries: string[];
+  mutations: string[];
+  subscriptions: string[];
+} {
+  // GraphQL type names cannot start with numbers, so prefix with 'T'
+  const prefixedTableName = `T${apiKeyHash}_${table.tableName}`;
+  const typeName = capitalize(prefixedTableName);
+  const connectionName = `${typeName}Connection`;
+  
+  // Generate field definitions
+  const fieldDefs = table.fields.map((field: any) => 
+    `  ${field.name}: ${mapDynamoTypeToGraphQL(field.type)}${field.required ? '!' : ''}`
+  ).join('\n');
+
+  const inputFieldDefs = table.fields.map((field: any) => 
+    `  ${field.name}: ${mapDynamoTypeToGraphQL(field.type)}`
+  ).join('\n');
+
+  // Get primary key field (first field or marked as primary)
+  const primaryKeyField = table.fields.find((f: any) => f.primary) || table.fields[0];
+  const pkType = mapDynamoTypeToGraphQL(primaryKeyField.type);
+
+  const types = [
+    `type ${typeName} {\n${fieldDefs}\n}`,
+    `type ${connectionName} {\n  items: [${typeName}]\n  nextToken: String\n}`
+  ];
+
+  const inputs = [
+    `input ${typeName}Input {\n${inputFieldDefs}\n}`,
+    `input ${typeName}UpdateInput {\n${inputFieldDefs}\n}`
+  ];
+
+  const queries = [
+    `get${typeName}(${primaryKeyField.name}: ${pkType}!): ${typeName}`,
+    `list${typeName}(limit: Int, nextToken: String): ${connectionName}`
+  ];
+
+  const mutations = [
+    `create${typeName}(input: ${typeName}Input!): ${typeName}`,
+    `update${typeName}(${primaryKeyField.name}: ${pkType}!, input: ${typeName}UpdateInput!): ${typeName}`,
+    `delete${typeName}(${primaryKeyField.name}: ${pkType}!): ${typeName}`
+  ];
+
+  // Generate subscription parts based on table subscriptions
+  const subscriptions: string[] = [];
+  if (table.subscriptions && table.subscriptions.length > 0) {
+    for (const sub of table.subscriptions) {
+      let filterArgs = '';
+      if (sub.filters && sub.filters.length > 0) {
+        const filterFields = sub.filters.map((filter: any) => 
+          `${filter.field}: ${mapDynamoTypeToGraphQL(filter.type)}`
+        ).join(', ');
+        filterArgs = `(${filterFields})`;
+      }
+
+      subscriptions.push(
+        `on${typeName}${capitalize(sub.event)}${filterArgs}: ${typeName}\n    @aws_subscribe(mutations: ["create${typeName}", "update${typeName}", "delete${typeName}"])`
+      );
+    }
+  } else {
+    // Default subscriptions
+    subscriptions.push(
+      `on${typeName}Create: ${typeName}\n    @aws_subscribe(mutations: ["create${typeName}", "update${typeName}", "delete${typeName}"])`,
+      `on${typeName}Update: ${typeName}\n    @aws_subscribe(mutations: ["create${typeName}", "update${typeName}", "delete${typeName}"])`,
+      `on${typeName}Delete: ${typeName}\n    @aws_subscribe(mutations: ["create${typeName}", "update${typeName}", "delete${typeName}"])`,
+      `on${typeName}Change: ${typeName}\n    @aws_subscribe(mutations: ["create${typeName}", "update${typeName}", "delete${typeName}"])`
+    );
+  }
+
+  return { types, inputs, queries, mutations, subscriptions };
+}
+
+/**
+ * Map DynamoDB types to GraphQL types
+ */
+function mapDynamoTypeToGraphQL(dynamoType: string): string {
+  switch (dynamoType.toLowerCase()) {
+    case 'string': return 'String';
+    case 'number':
+    case 'float': return 'Float';
+    case 'int':
+    case 'integer': return 'Int';
+    case 'boolean':
+    case 'bool': return 'Boolean';
+    case 'list':
+    case 'array': return '[String]';
+    default: return 'String';
+  }
+}
+
+
+
+/**
+ * Create resolvers for tables of a specific API key
+ */
+async function createResolversForApiKey(tables: any[], apiKeyHash: string): Promise<void> {
+  console.log(`Creating resolvers for API key hash: ${apiKeyHash}, tables count: ${tables.length}`);
+  
+  for (const table of tables) {
+    // GraphQL type names cannot start with numbers, so prefix with 'T'
+    const prefixedTableName = `T${apiKeyHash}_${table.tableName}`;
+    const typeName = capitalize(prefixedTableName);
+    const dataSource = `rdb_data_${apiKeyHash}_${table.tableName}`;
+
+    console.log(`Processing table: ${table.tableName}, typeName: ${typeName}, dataSource: ${dataSource}`);
+
+    try {
+      // Create data source for the table if it doesn't exist
+      await createDataSource(table.tableId, dataSource);
+
+      // Create resolvers for queries
+      console.log(`Creating resolver: Query.get${typeName}`);
+      await createResolver(`Query`, `get${typeName}`, dataSource, 'get');
+      console.log(`Creating resolver: Query.list${typeName}`);
+      await createResolver(`Query`, `list${typeName}`, dataSource, 'list');
+
+      // Create resolvers for mutations
+      await createResolver(`Mutation`, `create${typeName}`, dataSource, 'create');
+      await createResolver(`Mutation`, `update${typeName}`, dataSource, 'update');
+      await createResolver(`Mutation`, `delete${typeName}`, dataSource, 'delete');
+
+    } catch (error) {
+      console.error(`Failed to create resolvers for table ${table.tableName} (${apiKeyHash}):`, error);
+      // Continue with other tables
+    }
   }
 }
 
@@ -175,39 +417,15 @@ async function waitForSchemaCreation(): Promise<void> {
   throw new Error('Schema creation timeout');
 }
 
-/**
- * Create resolvers for table operations
- */
-async function createResolvers(tables: any[]): Promise<void> {
-  for (const table of tables) {
-    const typeName = capitalize(table.tableName);
-    const dataSource = `rdb-data-${table.tableId}`;
 
-    try {
-      // Create data source for the table if it doesn't exist
-      await createDataSource(table.tableId, dataSource);
-
-      // Create resolvers for queries
-      await createResolver(`Query`, `get${typeName}`, dataSource, 'get');
-      await createResolver(`Query`, `list${typeName}s`, dataSource, 'list');
-
-      // Create resolvers for mutations
-      await createResolver(`Mutation`, `create${typeName}`, dataSource, 'create');
-      await createResolver(`Mutation`, `update${typeName}`, dataSource, 'update');
-      await createResolver(`Mutation`, `delete${typeName}`, dataSource, 'delete');
-
-    } catch (error) {
-      console.error(`Failed to create resolvers for table ${table.tableName}:`, error);
-      // Continue with other tables
-    }
-  }
-}
 
 /**
  * Create AppSync data source
  */
 async function createDataSource(tableId: string, dataSourceName: string): Promise<void> {
   const tableName = `rdb-data-${tableId}`;
+
+  console.log(`Creating data source: ${dataSourceName} for table: ${tableName}`);
 
   try {
     await appSync.send(new CreateDataSourceCommand({
@@ -218,13 +436,17 @@ async function createDataSource(tableId: string, dataSourceName: string): Promis
         tableName: tableName,
         awsRegion: process.env.AWS_REGION || 'us-east-1',
       },
-      serviceRoleArn: process.env.APPSYNC_SERVICE_ROLE_ARN || '', // This would need to be configured
+      serviceRoleArn: process.env.APPSYNC_SERVICE_ROLE_ARN!
     }));
+    console.log(`Data source ${dataSourceName} created successfully`);
   } catch (error: any) {
-    if (error.name !== 'ConflictException') {
-      throw error;
+    // Handle both ConflictException and BadRequestException for existing data sources
+    if (error.name === 'ConflictException' || 
+        (error.name === 'BadRequestException' && error.message?.includes('already exists'))) {
+      console.log(`Data source ${dataSourceName} already exists, skipping creation`);
+      return;
     }
-    // Data source already exists
+    throw error;
   }
 }
 

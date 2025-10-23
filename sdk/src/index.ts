@@ -55,7 +55,8 @@ export class RdbClient {
       },
       hooks: {
         beforeError: [
-          (error: any) => {
+          async (error: any) => {
+            console.warn('error: ', await error.response.json());
             const { response } = error;
             if (response && response.body) {
               error.name = 'RdbApiError';
@@ -254,9 +255,20 @@ export class RdbClient {
         message: response.message,
         data: response.table
       };
-    } catch (err: any) {
-      const error = await err.json()
-      throw new Error(`Failed to create table: ${JSON.stringify(error.response?.data?.error || error.message)}`);
+    } catch (error: any) {
+      // Handle both network errors and API errors
+      let errorMessage = 'Unknown error';
+      try {
+        if (error.response) {
+          const errorData = await error.response.json();
+          errorMessage = errorData.error || errorData.message || error.message;
+        } else {
+          errorMessage = error.message;
+        }
+      } catch {
+        errorMessage = error.message || 'Network error';
+      }
+      throw new Error(`Failed to create table: ${errorMessage}`);
     }
   }
 
@@ -386,6 +398,7 @@ export class RdbClient {
     tableName: string;
     fields: TableField[];
     description?: string;
+    graphqlTypeName?: string;
   }> {
     try {
       // First try to get from the listTables response which includes full metadata
@@ -393,11 +406,18 @@ export class RdbClient {
       if (tablesResponse.success && tablesResponse.data?.items) {
         const table = tablesResponse.data.items.find(t => t.tableName === tableName);
         if (table) {
-          return {
+          const result: {
+            tableName: string;
+            fields: TableField[];
+            description?: string;
+            graphqlTypeName?: string;
+          } = {
             tableName: table.tableName,
             fields: table.fields,
-            description: table.description
           };
+          if (table.description) result.description = table.description;
+          if (table.graphqlTypeName) result.graphqlTypeName = table.graphqlTypeName;
+          return result;
         }
       }
       
@@ -754,54 +774,133 @@ export class RdbSubscription<T = any> {
    * @example
    * ```typescript
    * const subscription = await users.subscribe({
+   *   filters: { chatId: 'room123' }, // Dynamic runtime filters
    *   onData: (user: User) => console.log('User changed:', user)
    * });
    * const observable = await subscription.connect();
    * ```
    */
   async connect(): Promise<Observable<T>> {
-    const typeName = this.capitalize(this.tableName);
-    
-    // Get table schema to generate dynamic fields
-    let fields: string[] = ['id', 'createdAt', 'updatedAt']; // Default fields
+    // Get table metadata to fetch the GraphQL type name and subscription config
+    let graphqlTypeName: string;
+    let fields: string[] = []; // We'll get fields from schema
+    let subscriptions: any[] = [];
     
     try {
-      const schema = await this.client.getTableSchema(this.tableName);
-      if (schema.fields) {
-        // Add all schema fields to the subscription
-        const schemaFields = Object.keys(schema.fields).filter(
-          field => !['id', 'createdAt', 'updatedAt'].includes(field)
-        );
-        fields = [...fields, ...schemaFields];
+      const tablesResponse = await this.client.listTables();
+      if (tablesResponse.success && tablesResponse.data?.items) {
+        const table = tablesResponse.data.items.find(t => t.tableName === this.tableName);
+        if (table) {
+          // Use the stored GraphQL type name if available
+          graphqlTypeName = table.graphqlTypeName || this.capitalize(this.tableName);
+          
+          // Extract field names from metadata
+          if (table.fields && table.fields.length > 0) {
+            fields = table.fields.map(f => f.name);
+          }
+          
+          // Get subscription configuration with filter definitions
+          subscriptions = table.subscriptions || [];
+        } else {
+          throw new Error(`Table ${this.tableName} not found`);
+        }
+      } else {
+        throw new Error('Failed to fetch table metadata');
       }
     } catch (error) {
-      console.warn(`Could not fetch schema for ${this.tableName}, using default fields:`, error);
+      console.warn(`Could not fetch metadata for ${this.tableName}, using fallback:`, error);
+      graphqlTypeName = this.capitalize(this.tableName);
+      fields = ['name', 'email', 'age', 'active'];
     }
     
-    // Build GraphQL subscription query with dynamic fields
+    // Build GraphQL subscription query with dynamic fields and filter arguments
     const fieldsQuery = fields.join('\n          ');
+    
+    // Build filter arguments from the subscription configuration
+    const filterArgs: string[] = [];
+    const filterVariables: { [key: string]: any } = {};
+    
+    // Find the 'create' subscription configuration to get filter definitions
+    const createSubscription = subscriptions.find((sub: any) => sub.event === 'create');
+    
+    if (createSubscription && createSubscription.filters) {
+      // Use filters from subscription configuration
+      createSubscription.filters.forEach((filter: any) => {
+        const fieldName = filter.field;
+        const fieldType = filter.type;
+        
+        // Map backend types to GraphQL types
+        let gqlType = 'String';
+        if (fieldType === 'Boolean') gqlType = 'Boolean';
+        else if (fieldType === 'Int') gqlType = 'Int';
+        else if (fieldType === 'Float') gqlType = 'Float';
+        
+        filterArgs.push(`$${fieldName}: ${gqlType}`);
+        
+        // Use runtime filter value if provided, otherwise undefined (optional)
+        if (this.options.filters && this.options.filters[fieldName] !== undefined) {
+          filterVariables[fieldName] = this.options.filters[fieldName];
+        }
+      });
+    } else if (this.options.filters) {
+      // Fallback: infer from runtime filters if no subscription config
+      Object.keys(this.options.filters).forEach(key => {
+        const value = this.options.filters![key];
+        let gqlType = 'String';
+        
+        if (typeof value === 'boolean') gqlType = 'Boolean';
+        else if (typeof value === 'number') gqlType = Number.isInteger(value) ? 'Int' : 'Float';
+        
+        filterArgs.push(`$${key}: ${gqlType}`);
+        filterVariables[key] = value;
+      });
+    }
+    
+    // Build the argument list for the subscription field
+    // Include all filter arguments defined in the schema, passing variables
+    const subscriptionFieldArgs = filterArgs.length > 0
+      ? `(${filterArgs
+          .filter((arg): arg is string => typeof arg === 'string' && arg.trim().length > 0)
+          .map(arg => {
+            const parts = arg.split(':');
+            const varName = parts[0]?.trim().substring(1); // Extract variable name without $
+            return `${varName}: $${varName}`;
+          })
+          .join(', ')})`
+      : '';
+    
+    // Build the subscription query - subscribing to Create events with filters
+    const variableDefinitions = filterArgs.length > 0 ? `(${filterArgs.join(', ')})` : '';
+    
     const subscriptionQuery = gql`
-      subscription On${typeName}Change($filters: ${typeName}FilterInput) {
-        on${typeName}Change(filters: $filters) {
+      subscription On${graphqlTypeName}Create${variableDefinitions} {
+        on${graphqlTypeName}Create${subscriptionFieldArgs} {
           ${fieldsQuery}
         }
       }
     `;
 
-    // Create Apollo subscription
+    console.log('[RDB] Subscription query:', subscriptionQuery.loc?.source.body);
+    console.log('[RDB] Subscription variables:', filterVariables);
+
+    // Create Apollo subscription with runtime filter values
     this.subscription = this.apolloClient.subscribe({
       query: subscriptionQuery,
-      variables: {
-        filters: this.options.filters || {},
-      },
+      variables: filterVariables,
     });
 
     // Set up subscription handlers with type safety
     this.subscription.subscribe({
       next: (result: any) => {
         if (this.options.onData && result.data) {
-          const typedData: T = result.data[`on${typeName}Change`];
-          this.options.onData(typedData);
+          // Try all possible subscription field names
+          const typedData: T = result.data[`on${graphqlTypeName}Create`] 
+            || result.data[`on${graphqlTypeName}Update`] 
+            || result.data[`on${graphqlTypeName}Delete`];
+          
+          if (typedData) {
+            this.options.onData(typedData);
+          }
         }
       },
       error: (error: any) => {

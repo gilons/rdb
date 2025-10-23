@@ -11,6 +11,8 @@
     "test:create-table": "ts-node src/test-create-table.ts",
     "test:list-tables": "ts-node src/test-list-tables.ts",
     "test:update-subscriptions": "ts-node src/test-update-subscriptions.ts",
+    "test:realtime": "ts-node src/test-realtime.ts",
+    "trigger:update": "ts-node src/trigger-update.ts",
     "demo": "ts-node src/demo.ts",
     "crud": "ts-node src/crud-demo.ts",
     "realtime": "ts-node src/realtime-demo.ts",
@@ -19,7 +21,7 @@
     "test": "ts-node src/test.ts"
   },
   "dependencies": {
-    "@realdb/client": "^1.2.1",
+    "@realdb/client": "^1.2.6",
     "dotenv": "^16.3.1",
     "react": "^19.2.0"
   },

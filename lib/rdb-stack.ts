@@ -82,23 +82,46 @@ export class RdbStack extends cdk.Stack {
     });
 
     // ========================================
+    // IAM ROLES
+    // ========================================
+
+    // AppSync service role for DynamoDB access
+    const appSyncServiceRole = new iam.Role(this, 'AppSyncServiceRole', {
+      assumedBy: new iam.ServicePrincipal('appsync.amazonaws.com'),
+      inlinePolicies: {
+        DynamoDbAccessPolicy: new iam.PolicyDocument({
+          statements: [
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: [
+                'dynamodb:GetItem',
+                'dynamodb:PutItem',
+                'dynamodb:DeleteItem',
+                'dynamodb:UpdateItem',
+                'dynamodb:Query',
+                'dynamodb:Scan',
+              ],
+              resources: [`arn:aws:dynamodb:${this.region}:${this.account}:table/rdb-data-*`],
+            }),
+          ],
+        }),
+      },
+    });
+
+    // ========================================
     // LAMBDA FUNCTIONS
     // ========================================
 
     // Table management Lambda
     const tableManagementFunction = new NodejsFunction(this, 'TableManagementFunction', {
       runtime: lambda.Runtime.NODEJS_18_X,
-      entry: 'src/lambdas/table-management/index.ts',
+      entry: 'src/lambdas/table-managements/index.ts',
       handler: 'handler',
       environment: {
         TABLES_TABLE_NAME: tablesTable.tableName,
         CONFIG_BUCKET_NAME: this.configBucket.bucketName,
         APPSYNC_API_ID: this.appSyncApi.apiId,
       },
-      timeout: cdk.Duration.seconds(30),
-      bundling: {
-        forceDockerBundling: false,
-      }
     });
 
     // Records management Lambda
@@ -110,10 +133,6 @@ export class RdbStack extends cdk.Stack {
         TABLES_TABLE_NAME: tablesTable.tableName,
         APPSYNC_API_ID: this.appSyncApi.apiId,
       },
-      timeout: cdk.Duration.seconds(30),
-      bundling: {
-        forceDockerBundling: false,
-      }
     });
 
     // API key management Lambda
@@ -125,10 +144,6 @@ export class RdbStack extends cdk.Stack {
         API_KEYS_TABLE_NAME: apiKeysTable.tableName,
         SECRET_NAME: apiKeySecret.secretName,
       },
-      timeout: cdk.Duration.seconds(30),
-      bundling: {
-        forceDockerBundling: false,
-      }
     });
 
     // AppSync schema synchronization Lambda
@@ -139,11 +154,9 @@ export class RdbStack extends cdk.Stack {
       environment: {
         CONFIG_BUCKET_NAME: this.configBucket.bucketName,
         APPSYNC_API_ID: this.appSyncApi.apiId,
+        APPSYNC_SERVICE_ROLE_ARN: appSyncServiceRole.roleArn,
       },
-      timeout: cdk.Duration.minutes(5),
-      bundling: {
-        forceDockerBundling: false,
-      }
+      timeout: cdk.Duration.minutes(5)
     });
 
     // Lambda authorizer for API Gateway
@@ -155,10 +168,7 @@ export class RdbStack extends cdk.Stack {
         API_KEYS_TABLE_NAME: apiKeysTable.tableName,
         SECRET_NAME: apiKeySecret.secretName,
       },
-      timeout: cdk.Duration.seconds(10),
-      bundling: {
-        forceDockerBundling: false,
-      }
+      timeout: cdk.Duration.seconds(10)
     });
 
     // SDK configuration Lambda
@@ -169,10 +179,7 @@ export class RdbStack extends cdk.Stack {
       environment: {
         APPSYNC_API_ID: this.appSyncApi.apiId,
       },
-      timeout: cdk.Duration.seconds(10),
-      bundling: {
-        forceDockerBundling: false,
-      }
+      timeout: cdk.Duration.seconds(10)
     });
 
     // ========================================
@@ -227,27 +234,48 @@ export class RdbStack extends cdk.Stack {
 
     // Grant AppSync permissions
     const appSyncPolicy = new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'appsync:UpdateGraphqlApi',
-        'appsync:GetGraphqlApi',
-        'appsync:UpdateApiKey',
-        'appsync:ListApiKeys',
-        'appsync:CreateApiKey',
-        'appsync:DeleteApiKey',
-        'appsync:GetSchemaCreationStatus',
-        'appsync:StartSchemaCreation',
-        'appsync:UpdateResolver',
-        'appsync:CreateResolver',
-        'appsync:DeleteResolver',
-        'appsync:GetResolver',
-        'appsync:ListResolvers',
-      ],
-      resources: [this.appSyncApi.arn, `${this.appSyncApi.arn}/*`],
-    });
+  effect: iam.Effect.ALLOW,
+  actions: [
+    'appsync:UpdateGraphqlApi',
+    'appsync:GetGraphqlApi',
+    'appsync:UpdateApiKey',
+    'appsync:ListApiKeys',
+    'appsync:CreateApiKey',
+    'appsync:DeleteApiKey',
+    'appsync:GetSchemaCreationStatus',
+    'appsync:StartSchemaCreation',
+    'appsync:UpdateResolver',
+    'appsync:CreateResolver',
+    'appsync:DeleteResolver',
+    'appsync:GetResolver',
+    'appsync:ListResolvers',
+    'appsync:CreateDataSource',
+    'appsync:UpdateDataSource',
+    'appsync:DeleteDataSource',
+    'appsync:GetDataSource',
+    'appsync:ListDataSources',
+  ],
+  resources: [
+    // Grant permissions on the API itself
+    this.appSyncApi.arn, 
+    // Grant permissions on the resources within the API (datasources, resolvers, etc.)
+    `${this.appSyncApi.arn}/*`,
+    `arn:aws:appsync:${this.region}:${this.account}:/v1/apis/${this.appSyncApi.apiId}`,
+    `arn:aws:appsync:${this.region}:${this.account}:/v1/apis/${this.appSyncApi.apiId}/*`,
+    `arn:aws:appsync:${this.region}:${this.account}:/createdatasource`
+  ],
+});
 
     tableManagementFunction.addToRolePolicy(appSyncPolicy);
     schemaSyncFunction.addToRolePolicy(appSyncPolicy);
+
+    // Grant Schema Sync function permission to pass the AppSync Service Role
+    const passRolePolicy = new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['iam:PassRole'],
+      resources: [appSyncServiceRole.roleArn],
+    });
+    schemaSyncFunction.addToRolePolicy(passRolePolicy);
 
     // Grant SDK config function permissions to read AppSync API keys
     const appSyncReadPolicy = new iam.PolicyStatement({
@@ -256,7 +284,11 @@ export class RdbStack extends cdk.Stack {
         'appsync:ListApiKeys',
         'appsync:GetGraphqlApi',
       ],
-      resources: [this.appSyncApi.arn],
+      resources: [
+        this.appSyncApi.arn,
+        `${this.appSyncApi.arn}/*`,
+        `arn:aws:appsync:${this.region}:${this.account}:/v1/apis/${this.appSyncApi.apiId}/*`
+      ],
     });
 
     sdkConfigFunction.addToRolePolicy(appSyncReadPolicy);
@@ -269,13 +301,21 @@ export class RdbStack extends cdk.Stack {
     const authorizer = new apigateway.RequestAuthorizer(this, 'RdbAuthorizer', {
       handler: authorizerFunction,
       identitySources: [apigateway.IdentitySource.header('x-api-key')],
-      resultsCacheTtl: cdk.Duration.minutes(5),
+      resultsCacheTtl: cdk.Duration.seconds(0), // Disable caching to avoid authorization issues
     });
 
     // API Gateway
     this.api = new apigateway.RestApi(this, 'RdbApi', {
       restApiName: 'rdb-api',
       description: 'Realtime Database API',
+      cloudWatchRole: true,
+      cloudWatchRoleRemovalPolicy: cdk.RemovalPolicy.DESTROY,
+      deployOptions: {
+        stageName: 'prod',
+        loggingLevel: apigateway.MethodLoggingLevel.INFO,
+        dataTraceEnabled: true,
+        metricsEnabled: true,
+      },
       defaultCorsPreflightOptions: {
         allowOrigins: apigateway.Cors.ALL_ORIGINS,
         allowMethods: apigateway.Cors.ALL_METHODS,
@@ -344,9 +384,7 @@ export class RdbStack extends cdk.Stack {
       },
     });
 
-    s3ConfigChangeRule.addTarget(new targets.LambdaFunction(schemaSyncFunction, {
-      retryAttempts: 2
-    }));
+    s3ConfigChangeRule.addTarget(new targets.LambdaFunction(schemaSyncFunction));
 
     // ========================================
     // OUTPUTS

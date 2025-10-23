@@ -282,9 +282,18 @@ export function inferSchemaFromTableMetadata(tableMetadata: {
 } {
   const schema = tableFieldsToZodSchema(tableMetadata.fields);
   
-  return {
+  const result: {
+    schema: z.ZodObject<any>;
+    tableName: string;
+    description?: string;
+  } = {
     schema,
     tableName: tableMetadata.tableName,
-    description: tableMetadata.description
   };
+  
+  if (tableMetadata.description) {
+    result.description = tableMetadata.description;
+  }
+  
+  return result;
 }
