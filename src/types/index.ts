@@ -7,7 +7,8 @@ export interface TableField {
 }
 
 export interface TableSubscription {
-  event: 'create' | 'update' | 'delete' | 'change';
+  // Filters that will be available as parameters on ALL subscription queries (onCreate, onUpdate, onDelete)
+  // Backend always creates 3 separate subscriptions, each listening to its own mutation
   filters?: Array<{
     field: string;
     type: string;
@@ -82,4 +83,10 @@ export interface QueryOptions {
   limit?: number;
   nextToken?: string;
   filters?: { [key: string]: any };
+}
+
+export interface TableDecommissionMessage {
+  apiKey: string;
+  tableName: string;
+  tableId: string;
 }

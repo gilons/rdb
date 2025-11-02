@@ -7,7 +7,8 @@ export interface TableField {
 }
 
 export interface TableSubscription {
-  event: 'create' | 'update' | 'delete' | 'change';
+  // Filters that will be available as parameters on ALL subscription queries (onCreate, onUpdate, onDelete)
+  // Backend always creates 3 separate subscriptions, each listening to its own mutation
   filters?: Array<{
     field: string;
     type: string;
@@ -80,7 +81,8 @@ export interface InternalConfig extends RdbConfig {
 }
 
 export interface SubscriptionOptions<T = any> {
-  filters?: { [key: string]: any };
+  event: 'create' | 'update' | 'delete'; // Explicitly specify which event to listen to
+  filters?: { [key: string]: any }; // Runtime filter values
   onData?: (data: T) => void;
   onError?: (error: any) => void;
   onComplete?: () => void;

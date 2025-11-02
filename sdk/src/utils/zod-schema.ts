@@ -46,11 +46,6 @@ function zodFieldToTableField(name: string, schema: z.ZodTypeAny): TableField | 
     unwrapped = (schema as any)._def.innerType;
   }
 
-  // Skip auto-generated fields
-  if (['id', 'createdAt', 'updatedAt'].includes(name)) {
-    return null;
-  }
-
   // Determine the backend type (capitalized for TableField interface)
   let backendType: 'String' | 'Int' | 'Float' | 'Boolean' | 'Array';
   let indexed = false;
@@ -58,23 +53,11 @@ function zodFieldToTableField(name: string, schema: z.ZodTypeAny): TableField | 
 
   if (unwrapped instanceof z.ZodString) {
     backendType = 'String';
-    // Consider email, url, and other string types as indexed
-    if (name.includes('email') || name.includes('url') || name.includes('id')) {
-      indexed = true;
-    }
-    if (name === 'id') {
-      primary = true;
-    }
   } else if (unwrapped instanceof z.ZodNumber) {
     // Check if it's an integer or float
     const checks = (unwrapped as any)._def.checks || [];
     const hasIntCheck = checks.some((check: any) => check.kind === 'int');
     backendType = hasIntCheck ? 'Int' : 'Float';
-    
-    // Index numeric fields that might be used for filtering
-    if (name.includes('price') || name.includes('age') || name.includes('count')) {
-      indexed = true;
-    }
   } else if (unwrapped instanceof z.ZodBoolean) {
     backendType = 'Boolean';
   } else if (unwrapped instanceof z.ZodArray) {
@@ -82,11 +65,9 @@ function zodFieldToTableField(name: string, schema: z.ZodTypeAny): TableField | 
   } else if (unwrapped instanceof z.ZodDate) {
     // Dates are stored as strings in the backend
     backendType = 'String';
-    indexed = true;
   } else if (unwrapped instanceof z.ZodEnum) {
     // Enums are stored as strings
     backendType = 'String';
-    indexed = true; // Enums are good for filtering
   } else {
     // Default to string for unknown types
     backendType = 'String';
@@ -109,17 +90,80 @@ export function createTableConfigFromSchema<T extends z.ZodRawShape>(
   schema: z.ZodObject<T>,
   options: {
     description?: string;
+    indexedFields?: string[]; // Array of field names to create GSIs for
     subscriptions?: Array<{ 
-      event: 'create' | 'update' | 'delete' | 'change'; 
+      // Filters that will be added as parameters to ALL subscription queries (onCreate, onUpdate, onDelete)
       filters?: Array<{ field: string; type: string; operator?: 'eq' | 'ne' | 'gt' | 'lt' | 'gte' | 'lte' | 'contains'; value?: any }> 
     }>;
   } = {}
 ): TableConfig {
   const fields = zodSchemaToFields(schema);
   
+  // Mark fields as indexed if specified in indexedFields option
+  if (options.indexedFields && options.indexedFields.length > 0) {
+    options.indexedFields.forEach(fieldName => {
+      const field = fields.find(f => f.name === fieldName);
+      if (field) {
+        field.indexed = true;
+        console.log(`[RDB] Field '${fieldName}' will be indexed for GSI`);
+      } else {
+        console.warn(`[RDB] Warning: Indexed field '${fieldName}' not found in schema fields`);
+      }
+    });
+  }
+  
+  // Ensure 'id' field exists and is marked as primary key
+  const idFieldIndex = fields.findIndex(f => f.name === 'id');
+  if (idFieldIndex !== -1 && fields[idFieldIndex]) {
+    // 'id' field exists in user schema - mark it as primary and ensure it's a String
+    const existingField = fields[idFieldIndex];
+    fields[idFieldIndex] = {
+      name: existingField.name,
+      type: 'String',
+      required: existingField.required ?? true, // Default to true if undefined
+      primary: true,
+      indexed: false // Primary keys don't need GSI
+    };
+  } else {
+    // 'id' field doesn't exist - add it as the first field
+    fields.unshift({
+      name: 'id',
+      type: 'String',
+      required: true,
+      primary: true,
+      indexed: false
+    });
+  }
+  
+  // Add system timestamp fields if they don't already exist
+  const systemFields: TableField[] = [];
+  
+  if (!fields.find(f => f.name === 'createdAt')) {
+    systemFields.push({
+      name: 'createdAt',
+      type: 'String',
+      required: true,
+      indexed: false,
+      primary: false
+    });
+  }
+  
+  if (!fields.find(f => f.name === 'updatedAt')) {
+    systemFields.push({
+      name: 'updatedAt',
+      type: 'String',
+      required: true,
+      indexed: false,
+      primary: false
+    });
+  }
+  
+  // Add system timestamp fields after the user fields (id is already first)
+  const allFields = [...fields, ...systemFields];
+  
   const tableConfig: TableConfig = {
     tableName,
-    fields,
+    fields: allFields,
     description: options.description || `Table created from Zod schema`
   };
 
@@ -153,28 +197,6 @@ export function createTypedTable<T extends z.ZodRawShape>(
     __type: {} as InferSchemaType<z.ZodObject<T>>
   };
 }
-
-// Common field validators for convenience
-export const CommonFields = {
-  id: z.string().optional(),
-  email: z.string().email(),
-  url: z.string().url(),
-  phone: z.string().min(10),
-  age: z.number().int().min(0).max(150),
-  price: z.number().min(0),
-  isActive: z.boolean().default(true),
-  tags: z.array(z.string()).default([]),
-  createdAt: z.string().optional(),
-  updatedAt: z.string().optional(),
-  
-  // Common enum fields
-  priority: z.enum(['low', 'medium', 'high']).default('medium'),
-  status: z.enum(['active', 'inactive', 'pending']).default('active'),
-  
-  // Date handling
-  date: z.date().transform(date => date.toISOString()),
-  timestamp: z.string().datetime(),
-} as const;
 
 /**
  * Validation helper to ensure data matches the schema before sending to backend

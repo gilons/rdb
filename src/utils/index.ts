@@ -43,6 +43,7 @@ export function capitalize(str: string): string {
 
 /**
  * Convert field type to GraphQL type
+ * Note: Arrays and complex types are mapped to AWSJSON scalar to handle any structure
  */
 export function getGraphQLType(fieldType: string): string {
   switch (fieldType?.toLowerCase()) {
@@ -58,7 +59,11 @@ export function getGraphQLType(fieldType: string): string {
       return 'Boolean';
     case 'array':
     case 'list':
-      return '[String]';
+    case 'object':
+    case 'json':
+      // Use AWSJSON scalar for complex types (arrays, objects, etc.)
+      // This allows any valid JSON structure without type restrictions
+      return 'AWSJSON';
     default:
       return 'String';
   }

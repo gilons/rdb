@@ -1,29 +1,21 @@
 {
   "name": "rdb-nodejs-example",
   "version": "1.0.0",
-  "description": "Basic Node.js TypeScript example using @realdb/client SDK",
+  "description": "Real-time chat system example using @realdb/client SDK with WebSocket subscriptions and advanced filtering",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
     "start": "npm run build && node dist/index.js",
-    "dev": "ts-node src/index.ts",
-    "test:reset": "rm -f .test-state-*.json && npm run dev",
-    "test:create-table": "ts-node src/test-create-table.ts",
-    "test:list-tables": "ts-node src/test-list-tables.ts",
-    "test:update-subscriptions": "ts-node src/test-update-subscriptions.ts",
-    "test:realtime": "ts-node src/test-realtime.ts",
-    "trigger:update": "ts-node src/trigger-update.ts",
-    "demo": "ts-node src/demo.ts",
-    "crud": "ts-node src/crud-demo.ts",
-    "realtime": "ts-node src/realtime-demo.ts",
-    "batch": "ts-node src/batch-operations.ts",
-    "setup": "ts-node src/setup.ts",
-    "test": "ts-node src/test.ts"
+    "chat:setup": "ts-node src/setup-chat.ts",
+    "chat:listen": "ts-node src/chat-listen.ts",
+    "chat:listen:filtered": "ts-node src/chat-listen-filtered.ts",
+    "message:send": "ts-node src/message-send.ts",
+    "message:edit": "ts-node src/message-edit.ts",
+    "message:delete": "ts-node src/message-delete.ts"
   },
   "dependencies": {
-    "@realdb/client": "^1.2.6",
-    "dotenv": "^16.3.1",
-    "react": "^19.2.0"
+    "@realdb/client": "1.3.0",
+    "dotenv": "^16.3.1"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

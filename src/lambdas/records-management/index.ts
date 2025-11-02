@@ -1,22 +1,13 @@
-import { APIGatewayProxyEvent, APIGatewayProxyResult, Context } from 'aws-lambda';
-import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
-import { 
-  DynamoDBDocumentClient, 
-  GetCommand, 
-  ScanCommand, 
-  PutCommand, 
-  DeleteCommand 
-} from '@aws-sdk/lib-dynamodb';
-import { AppSyncClient } from '@aws-sdk/client-appsync';
+import { Hono } from 'hono';
+import { handle } from 'hono/aws-lambda';
+import * as https from 'https';
 import * as crypto from 'crypto';
+import { v4 as uuidv4 } from 'uuid';
+import { getTable } from '../../utils/dynamodb';
+import { getGraphQLType, capitalize } from '../../utils';
 
-const dynamodbClient = new DynamoDBClient({ region: process.env.AWS_REGION || 'us-east-1' });
-const dynamodb = DynamoDBDocumentClient.from(dynamodbClient);
-const appSync = new AppSyncClient({ region: process.env.AWS_REGION || 'us-east-1' });
-
-const TABLES_TABLE_NAME = process.env.TABLES_TABLE_NAME!;
-const APPSYNC_API_ID = process.env.APPSYNC_API_ID!;
-
+const APPSYNC_API_URL = process.env.APPSYNC_API_URL!;
+const APPSYNC_API_KEY = process.env.APPSYNC_API_KEY!;
 interface TableRecord {
   [key: string]: any;
   createdAt?: string;
@@ -37,273 +28,505 @@ interface TableInfo {
   fields: TableField[];
   apiKey: string;
   subscriptions?: any[];
+  graphqlTypeName?: string;
 }
 
+type Variables = {
+  apiKey: string;
+  apiKeyHash: string;
+};
+
+const app = new Hono<{ Variables: Variables }>();
+
+// Enable CORS
+app.use('*', async (c, next) => {
+  await next();
+  c.header('Access-Control-Allow-Origin', '*');
+  c.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  c.header('Access-Control-Allow-Headers', 'Content-Type, X-Amz-Date, Authorization, X-Api-Key');
+});
+
+// Middleware to extract API key
+app.use('*', async (c, next) => {
+  const apiKey = c.req.header('X-Api-Key') || c.req.header('x-api-key');
+  if (apiKey) {
+    c.set('apiKey', apiKey);
+    c.set('apiKeyHash', getApiKeyHash(apiKey));
+  }
+  await next();
+});
+
 /**
- * Lambda handler for records management operations
- * Supports: CREATE, LIST, DELETE records in user tables
+ * GET /tables/:tableName/records
+ * List all records in a table
  */
-export const handler = async (
-  event: APIGatewayProxyEvent,
-  context: Context
-): Promise<APIGatewayProxyResult> => {
-  console.log('Event received for records management operation');
-
-  const { httpMethod, headers, pathParameters, body, requestContext, queryStringParameters } = event;
-  const apiKey = headers['X-Api-Key'] || (requestContext as any)?.authorizer?.apiKey;
-  const tableName = pathParameters?.tableName;
-
-  if (!apiKey) {
-    return {
-      statusCode: 401,
-      headers: getCorsHeaders(),
-      body: JSON.stringify({ 
-        success: false,
-        error: 'Missing API key' 
-      }),
-    };
-  }
-
-  const apiKeyHash = getApiKeyHash(apiKey);
-  console.log('Processing request for API key hash:', apiKeyHash, 'table:', tableName);
-
-  if (!tableName) {
-    return {
-      statusCode: 400,
-      headers: getCorsHeaders(),
-      body: JSON.stringify({ 
-        success: false,
-        error: 'Table name is required' 
-      }),
-    };
-  }
+app.get('/tables/:tableName/records', async (c) => {
+  const apiKeyHash = c.get('apiKeyHash');
+  const tableName = c.req.param('tableName');
+  const limit = parseInt(c.req.query('limit') || '50');
+  const nextToken = c.req.query('nextToken');
 
   try {
     // Verify table exists and get table info
     const tableInfo = await getTableInfo(apiKeyHash, tableName);
     if (!tableInfo) {
-      return {
-        statusCode: 404,
-        headers: getCorsHeaders(),
-        body: JSON.stringify({ 
-          success: false,
-          error: 'Table not found' 
-        }),
-      };
+      return c.json({ success: false, error: 'Table not found' }, 404);
     }
 
-    switch (httpMethod) {
-      case 'GET':
-        return await listRecords(tableInfo, queryStringParameters);
-      case 'POST':
-        let recordData: TableRecord;
-        try {
-          recordData = JSON.parse(body || '{}');
-        } catch (parseError) {
-          return {
-            statusCode: 400,
-            headers: getCorsHeaders(),
-            body: JSON.stringify({ error: 'Invalid JSON in request body' }),
-          };
+    // Extract filter parameters from query (format: filter_fieldName=value)
+    const filters: Record<string, any> = {};
+    const queryParams = c.req.query();
+    Object.keys(queryParams).forEach(key => {
+      if (key.startsWith('filter_')) {
+        const fieldName = key.substring(7); // Remove 'filter_' prefix
+        filters[fieldName] = queryParams[key];
+      }
+    });
+
+    // Build GraphQL query
+    const graphqlTypeName = tableInfo.graphqlTypeName || `T${tableInfo.apiKey}_${tableInfo.tableName}`;
+    const capitalizedTypeName = capitalize(graphqlTypeName);
+    
+    // Build field list from table schema
+    const fieldsList = tableInfo.fields.map(f => f.name).join('\n    ');
+    
+    // Build filter parameters for GraphQL query (only indexed fields for efficiency)
+    const indexedFields = tableInfo.fields.filter(f => f.indexed && !f.primary);
+    const filterVariableDeclarations: string[] = [];
+    const filterArguments: string[] = [];
+    const filterVariables: Record<string, any> = {};
+    
+    indexedFields.forEach(field => {
+      if (filters[field.name] !== undefined) {
+        const graphqlType = getGraphQLType(field.type);
+        filterVariableDeclarations.push(`$${field.name}: ${graphqlType}`);
+        filterArguments.push(`${field.name}: $${field.name}`);
+        filterVariables[field.name] = filters[field.name];
+      }
+    });
+    
+    const filterVarDecl = filterVariableDeclarations.length > 0 
+      ? ', ' + filterVariableDeclarations.join(', ')
+      : '';
+    const filterArgs = filterArguments.length > 0
+      ? filterArguments.join(', ') + ', '
+      : '';
+    
+    const query = `
+      query List${capitalizedTypeName}($limit: Int, $nextToken: String${filterVarDecl}) {
+        list${capitalizedTypeName}(${filterArgs}limit: $limit, nextToken: $nextToken) {
+          items {
+            ${fieldsList}
+          }
+          nextToken
         }
-        return await createRecord(tableInfo, recordData);
-      case 'DELETE':
-        return await deleteRecord(tableInfo, pathParameters?.recordId);
-      default:
-        return {
-          statusCode: 405,
-          headers: getCorsHeaders(),
-          body: JSON.stringify({ error: 'Method not allowed' }),
-        };
-    }
-  } catch (error) {
-    console.error('Error:', error);
-    return {
-      statusCode: 500,
-      headers: getCorsHeaders(),
-      body: JSON.stringify({ 
-        error: 'Internal server error', 
-        message: error instanceof Error ? error.message : 'Unknown error'
-      }),
+      }
+    `;
+
+    const variables = {
+      limit: Math.min(limit, 100),
+      ...(nextToken && { nextToken }),
+      ...filterVariables,
     };
+
+    const result = await executeGraphQL(query, variables);
+    
+    if (result.errors) {
+      console.error('GraphQL errors:', result.errors);
+      return c.json({ 
+        success: false,
+        error: 'GraphQL query failed',
+        details: result.errors 
+      }, 400);
+    }
+
+    const data = result.data[`list${capitalizedTypeName}`];
+    
+    return c.json({
+      success: true,
+      data: {
+        items: data.items || [],
+        count: data.items?.length || 0,
+        nextToken: data.nextToken || null,
+      }
+    });
+  } catch (error) {
+    console.error('Error listing records:', error);
+    return c.json({ 
+      success: false,
+      error: 'Failed to list records',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    }, 500);
   }
-};
+});
+
+/**
+ * GET /tables/:tableName/records/:recordId
+ * Get a single record by its ID (primary key)
+ */
+app.get('/tables/:tableName/records/:recordId', async (c) => {
+  const apiKeyHash = c.get('apiKeyHash');
+  const tableName = c.req.param('tableName');
+  const recordId = c.req.param('recordId');
+
+  try {
+    // Verify table exists and get table info
+    const tableInfo = await getTableInfo(apiKeyHash, tableName);
+    if (!tableInfo) {
+      return c.json({ success: false, error: 'Table not found' }, 404);
+    }
+
+    const { fields } = tableInfo;
+    
+    // Get primary key field (should be 'id' for most tables)
+    const primaryKey = fields.find(f => f.primary) || fields[0];
+
+    if (!primaryKey) {
+      return c.json({ error: 'No primary key found in table definition' }, 500);
+    }
+
+    // Build GraphQL query
+    const graphqlTypeName = tableInfo.graphqlTypeName || `T${tableInfo.apiKey}_${tableInfo.tableName}`;
+    const capitalizedTypeName = capitalize(graphqlTypeName);
+    
+    // Build field list from table schema
+    const fieldsList = fields.map(f => f.name).join('\n      ');
+    
+    // Map field type for GraphQL
+    const pkGraphQLType = getGraphQLType(primaryKey.type);
+    
+    const query = `
+      query Get${capitalizedTypeName}($${primaryKey.name}: ${pkGraphQLType}!) {
+        get${capitalizedTypeName}(${primaryKey.name}: $${primaryKey.name}) {
+          ${fieldsList}
+        }
+      }
+    `;
+
+    const variables = {
+      [primaryKey.name]: recordId,
+    };
+
+    const result = await executeGraphQL(query, variables);
+    
+    if (result.errors) {
+      console.error('GraphQL errors:', result.errors);
+      return c.json({ 
+        success: false,
+        error: 'GraphQL query failed',
+        details: result.errors 
+      }, 400);
+    }
+
+    const record = result.data[`get${capitalizedTypeName}`];
+
+    console.warn('response:', result);
+
+    console.warn('query:', query);
+    
+    // Return null if record not found (GraphQL returns null for non-existent records)
+    if (!record) {
+      return c.json({
+        success: true,
+        data: null,
+        message: 'Record not found'
+      }, 404);
+    }
+    
+    return c.json({
+      success: true,
+      data: record,
+    });
+  } catch (error) {
+    console.error('Error getting record:', error);
+    return c.json({ 
+      success: false,
+      error: 'Failed to get record',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    }, 500);
+  }
+});
+
+/**
+ * POST /tables/:tableName/records
+ * Create a new record in a table
+ */
+app.post('/tables/:tableName/records', async (c) => {
+  const apiKeyHash = c.get('apiKeyHash');
+  const tableName = c.req.param('tableName');
+
+  try {
+    const recordData = await c.req.json<TableRecord>();
+
+    // Verify table exists and get table info
+    const tableInfo = await getTableInfo(apiKeyHash, tableName);
+    if (!tableInfo) {
+      return c.json({ success: false, error: 'Table not found' }, 404);
+    }
+
+    const { fields } = tableInfo;
+
+    // Auto-generate 'id' if not provided (id is always the primary key)
+    if (!recordData.id) {
+      recordData.id = uuidv4();
+    }
+
+    // Auto-set timestamps (ISO 8601 format)
+    const now = new Date().toISOString();
+    recordData.createdAt = now;
+    recordData.updatedAt = now;
+
+    // Validate required fields (skip system-managed fields: id, createdAt, updatedAt)
+    const requiredFields = fields.filter(field => 
+      field.required && 
+      field.name !== 'id' && 
+      field.name !== 'createdAt' && 
+      field.name !== 'updatedAt'
+    );
+    for (const field of requiredFields) {
+      if (recordData[field.name] === undefined || recordData[field.name] === null || recordData[field.name] === '') {
+        return c.json({ error: `Required field '${field.name}' is missing` }, 400);
+      }
+    }
+
+    // Validate field types
+    for (const field of fields) {
+      const value = recordData[field.name];
+      if (value !== undefined && !validateFieldType(value, field.type)) {
+        return c.json({ 
+          error: `Invalid type for field '${field.name}'. Expected ${field.type}` 
+        }, 400);
+      }
+    }
+
+    // Build GraphQL mutation
+    const graphqlTypeName = tableInfo.graphqlTypeName || `T${tableInfo.apiKey}_${tableInfo.tableName}`;
+    const capitalizedTypeName = capitalize(graphqlTypeName);
+    
+    // Build field list from table schema
+    const fieldsList = fields.map(f => f.name).join('\n      ');
+    
+    const mutation = `
+      mutation Create${capitalizedTypeName}($input: ${capitalizedTypeName}Input!) {
+        create${capitalizedTypeName}(input: $input) {
+          ${fieldsList}
+        }
+      }
+    `;
+
+    const variables = {
+      input: recordData,
+    };
+
+    const result = await executeGraphQL(mutation, variables);
+    
+    if (result.errors) {
+      console.error('GraphQL errors:', result.errors);
+      return c.json({ 
+        success: false,
+        error: 'GraphQL mutation failed',
+        details: result.errors 
+      }, 400);
+    }
+
+    const createdRecord = result.data[`create${capitalizedTypeName}`];
+    
+    return c.json({
+      success: true,
+      message: 'Record created successfully',
+      data: createdRecord,
+    }, 201);
+  } catch (error) {
+    console.error('Error creating record:', error);
+    return c.json({ 
+      success: false,
+      error: 'Failed to create record',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    }, 500);
+  }
+});
+
+/**
+ * PUT /tables/:tableName/records/:recordId
+ * Update an existing record in a table
+ */
+app.put('/tables/:tableName/records/:recordId', async (c) => {
+  const apiKeyHash = c.get('apiKeyHash');
+  const tableName = c.req.param('tableName');
+  const recordId = c.req.param('recordId');
+
+  try {
+    const updates = await c.req.json<TableRecord>();
+
+    // Verify table exists and get table info
+    const tableInfo = await getTableInfo(apiKeyHash, tableName);
+    if (!tableInfo) {
+      return c.json({ success: false, error: 'Table not found' }, 404);
+    }
+
+    const { fields } = tableInfo;
+    const primaryKey = fields.find(f => f.primary) || fields[0];
+
+    if (!primaryKey) {
+      return c.json({ error: 'No primary key found in table definition' }, 500);
+    }
+
+    // Remove system-managed fields that should not be in the update input
+    // These fields are either immutable (id, createdAt) or auto-managed (updatedAt)
+    delete updates.createdAt;
+    delete updates[primaryKey.name]; // Remove primary key from updates
+
+    // Auto-update timestamp
+    updates.updatedAt = new Date().toISOString();
+
+    // Validate field types for provided fields
+    for (const field of fields) {
+      const value = updates[field.name];
+      if (value !== undefined && !validateFieldType(value, field.type)) {
+        return c.json({ 
+          error: `Invalid type for field '${field.name}'. Expected ${field.type}` 
+        }, 400);
+      }
+    }
+
+    // Build GraphQL mutation
+    const graphqlTypeName = tableInfo.graphqlTypeName || `T${tableInfo.apiKey}_${tableInfo.tableName}`;
+    const capitalizedTypeName = capitalize(graphqlTypeName);
+    
+    // Build field list from table schema
+    const fieldsList = fields.map(f => f.name).join('\n      ');
+    
+    // Map field type for GraphQL
+    const pkGraphQLType = getGraphQLType(primaryKey.type);
+    
+    const mutation = `
+      mutation Update${capitalizedTypeName}($${primaryKey.name}: ${pkGraphQLType}!, $input: ${capitalizedTypeName}UpdateInput!) {
+        update${capitalizedTypeName}(${primaryKey.name}: $${primaryKey.name}, input: $input) {
+          ${fieldsList}
+        }
+      }
+    `;
+
+    const variables = {
+      [primaryKey.name]: recordId,
+      input: updates,
+    };
+
+    const result = await executeGraphQL(mutation, variables);
+    
+    if (result.errors) {
+      console.error('GraphQL errors:', result.errors);
+      return c.json({ 
+        success: false,
+        error: 'GraphQL mutation failed',
+        details: result.errors 
+      }, 400);
+    }
+
+    const updatedRecord = result.data[`update${capitalizedTypeName}`];
+    
+    if (!updatedRecord) {
+      return c.json({
+        success: false,
+        error: 'Record not found',
+        message: 'No record was updated. Record may not exist.'
+      }, 404);
+    }
+    
+    return c.json({
+      success: true,
+      message: 'Record updated successfully',
+      data: updatedRecord,
+    });
+  } catch (error) {
+    console.error('Error updating record:', error);
+    return c.json({ 
+      success: false,
+      error: 'Failed to update record',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    }, 500);
+  }
+});
+
+/**
+ * DELETE /tables/:tableName/records/:recordId
+ * Delete a record from a table
+ */
+app.delete('/tables/:tableName/records/:recordId', async (c) => {
+  const apiKeyHash = c.get('apiKeyHash');
+  const tableName = c.req.param('tableName');
+  const recordId = c.req.param('recordId');
+
+  try {
+    // Verify table exists and get table info
+    const tableInfo = await getTableInfo(apiKeyHash, tableName);
+    if (!tableInfo) {
+      return c.json({ success: false, error: 'Table not found' }, 404);
+    }
+
+    const { fields } = tableInfo;
+    const primaryKey = fields.find(f => f.primary) || fields[0];
+
+    if (!primaryKey) {
+      return c.json({ error: 'No primary key found in table definition' }, 500);
+    }
+
+    // Build GraphQL mutation
+    const graphqlTypeName = tableInfo.graphqlTypeName || `T${tableInfo.apiKey}_${tableInfo.tableName}`;
+    const capitalizedTypeName = capitalize(graphqlTypeName);
+    
+    // Build field list from table schema
+    const fieldsList = fields.map(f => f.name).join('\n      ');
+    
+    // Map field type for GraphQL
+    const pkGraphQLType = getGraphQLType(primaryKey.type);
+    
+    const mutation = `
+      mutation Delete${capitalizedTypeName}($${primaryKey.name}: ${pkGraphQLType}!) {
+        delete${capitalizedTypeName}(${primaryKey.name}: $${primaryKey.name}) {
+          ${fieldsList}
+        }
+      }
+    `;
+
+    const variables = {
+      [primaryKey.name]: recordId,
+    };
+
+    const result = await executeGraphQL(mutation, variables);
+    
+    if (result.errors) {
+      console.error('GraphQL errors:', result.errors);
+      return c.json({ 
+        success: false,
+        error: 'GraphQL mutation failed',
+        details: result.errors 
+      }, 400);
+    }
+
+    const deletedRecord = result.data[`delete${capitalizedTypeName}`];
+    
+    return c.json({ 
+      success: true,
+      message: 'Record deleted successfully',
+      data: deletedRecord
+    });
+  } catch (error) {
+    console.error('Error deleting record:', error);
+    return c.json({ 
+      success: false,
+      error: 'Failed to delete record',
+      message: error instanceof Error ? error.message : 'Unknown error'
+    }, 500);
+  }
+});
 
 /**
  * Get table information
  */
 async function getTableInfo(apiKey: string, tableName: string): Promise<TableInfo | null> {
-  const result = await dynamodb.send(new GetCommand({
-    TableName: TABLES_TABLE_NAME,
-    Key: { apiKey, tableName },
-  }));
-
+  const result = await getTable(apiKey, tableName);
   return result.Item as TableInfo || null;
-}
-
-/**
- * List records in a table
- */
-async function listRecords(
-  tableInfo: TableInfo,
-  queryParams: { [key: string]: string | undefined } | null
-): Promise<APIGatewayProxyResult> {
-  const dataTableName = `rdb-data-${tableInfo.tableId}`;
-  const limitParam = queryParams?.limit;
-  const limit = limitParam && !isNaN(parseInt(limitParam)) ? parseInt(limitParam) : 50;
-  const nextToken = queryParams?.nextToken;
-
-  const params = {
-    TableName: dataTableName,
-    Limit: Math.min(limit, 100), // Cap at 100
-  } as any;
-
-  if (nextToken) {
-    try {
-      params.ExclusiveStartKey = JSON.parse(Buffer.from(nextToken, 'base64').toString());
-    } catch (error) {
-      return {
-        statusCode: 400,
-        headers: getCorsHeaders(),
-        body: JSON.stringify({ error: 'Invalid nextToken parameter' }),
-      };
-    }
-  }
-
-  const result = await dynamodb.send(new ScanCommand(params));
-
-  return {
-    statusCode: 200,
-    headers: getCorsHeaders(),
-    body: JSON.stringify({
-      success: true,
-      data: {
-        items: result.Items || [],
-        count: result.Count || 0,
-        nextToken: result.LastEvaluatedKey 
-          ? Buffer.from(JSON.stringify(result.LastEvaluatedKey)).toString('base64')
-          : null,
-      }
-    }),
-  };
-}
-
-/**
- * Create a record in a table
- */
-async function createRecord(tableInfo: TableInfo, recordData: TableRecord): Promise<APIGatewayProxyResult> {
-  const dataTableName = `rdb-data-${tableInfo.tableId}`;
-  const { fields } = tableInfo;
-
-  // Validate required fields
-  const requiredFields = fields.filter(field => field.required);
-  for (const field of requiredFields) {
-    if (recordData[field.name] === undefined || recordData[field.name] === null || recordData[field.name] === '') {
-      return {
-        statusCode: 400,
-        headers: getCorsHeaders(),
-        body: JSON.stringify({ error: `Required field '${field.name}' is missing` }),
-      };
-    }
-  }
-
-  // Validate field types
-  for (const field of fields) {
-    const value = recordData[field.name];
-    if (value !== undefined && !validateFieldType(value, field.type)) {
-      return {
-        statusCode: 400,
-        headers: getCorsHeaders(),
-        body: JSON.stringify({ 
-          error: `Invalid type for field '${field.name}'. Expected ${field.type}` 
-        }),
-      };
-    }
-  }
-
-  // Add timestamps
-  const timestamp = new Date().toISOString();
-  const record = {
-    ...recordData,
-    createdAt: timestamp,
-    updatedAt: timestamp,
-  };
-
-  // Save to DynamoDB
-  await dynamodb.send(new PutCommand({
-    TableName: dataTableName,
-    Item: record,
-  }));
-
-  // Trigger AppSync mutation for real-time updates
-  await triggerAppSyncMutation(tableInfo, 'create', record);
-
-  return {
-    statusCode: 201,
-    headers: getCorsHeaders(),
-    body: JSON.stringify({
-      success: true,
-      message: 'Record created successfully',
-      data: record,
-    }),
-  };
-}
-
-/**
- * Delete a record from a table
- */
-async function deleteRecord(tableInfo: TableInfo, recordId: string | undefined): Promise<APIGatewayProxyResult> {
-  if (!recordId) {
-    return {
-      statusCode: 400,
-      headers: getCorsHeaders(),
-      body: JSON.stringify({ error: 'Record ID is required' }),
-    };
-  }
-
-  const dataTableName = `rdb-data-${tableInfo.tableId}`;
-  const { fields } = tableInfo;
-  const primaryKey = fields.find(f => f.primary) || fields[0];
-
-  if (!primaryKey) {
-    return {
-      statusCode: 500,
-      headers: getCorsHeaders(),
-      body: JSON.stringify({ error: 'No primary key found in table definition' }),
-    };
-  }
-
-  // Get the record first for real-time notifications
-  const getResult = await dynamodb.send(new GetCommand({
-    TableName: dataTableName,
-    Key: { [primaryKey.name]: recordId },
-  }));
-
-  if (!getResult.Item) {
-    return {
-      statusCode: 404,
-      headers: getCorsHeaders(),
-      body: JSON.stringify({ error: 'Record not found' }),
-    };
-  }
-
-  // Delete from DynamoDB
-  await dynamodb.send(new DeleteCommand({
-    TableName: dataTableName,
-    Key: { [primaryKey.name]: recordId },
-  }));
-
-  // Trigger AppSync mutation for real-time updates
-  await triggerAppSyncMutation(tableInfo, 'delete', getResult.Item);
-
-  return {
-    statusCode: 200,
-    headers: getCorsHeaders(),
-    body: JSON.stringify({ 
-      success: true,
-      message: 'Record deleted successfully' 
-    }),
-  };
 }
 
 /**
@@ -332,47 +555,60 @@ function validateFieldType(value: any, expectedType: string): boolean {
 }
 
 /**
- * Trigger AppSync mutation for real-time updates
+ * Execute GraphQL query/mutation against AppSync
  */
-async function triggerAppSyncMutation(tableInfo: TableInfo, operation: string, record: TableRecord): Promise<void> {
-  // This would integrate with AppSync to send real-time updates
-  // For now, we'll log the event that would be sent (without exposing sensitive data)
-  console.log('AppSync mutation trigger:', {
-    tableName: tableInfo.tableName,
-    operation,
-    recordId: record.id || '[no-id]',
-    timestamp: new Date().toISOString(),
+async function executeGraphQL(query: string, variables: any = {}): Promise<any> {
+  const url = new URL(APPSYNC_API_URL);
+  
+  const payload = JSON.stringify({
+    query,
+    variables,
   });
 
-  // In a real implementation, this would:
-  // 1. Format the mutation based on the operation
-  // 2. Send the mutation to AppSync
-  // 3. AppSync would then notify all subscribers
+  return new Promise((resolve, reject) => {
+    const options = {
+      hostname: url.hostname,
+      path: url.pathname,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': APPSYNC_API_KEY,
+        'Content-Length': Buffer.byteLength(payload),
+      },
+    };
+
+    const req = https.request(options, (res) => {
+      let data = '';
+      
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+
+      res.on('end', () => {
+        try {
+          const result = JSON.parse(data);
+          resolve(result);
+        } catch (error) {
+          reject(new Error(`Failed to parse GraphQL response: ${data}`));
+        }
+      });
+    });
+
+    req.on('error', (error) => {
+      reject(error);
+    });
+
+    req.write(payload);
+    req.end();
+  });
 }
 
 /**
  * Generate a consistent hash for API key (for logging and identification)
- * This ensures API keys are never exposed in logs
  */
 function getApiKeyHash(apiKey: string): string {
   return crypto.createHash('sha256').update(apiKey).digest('hex').substring(0, 8);
 }
 
-/**
- * Sanitize API key for secure logging - only show first 4 chars and hash
- */
-function sanitizeApiKeyForLogging(apiKey: string): string {
-  if (!apiKey || apiKey.length < 8) return '[INVALID_KEY]';
-  const prefix = apiKey.substring(0, 4);
-  const hash = getApiKeyHash(apiKey);
-  return `${prefix}***[${hash}]`;
-}
-
-function getCorsHeaders() {
-  return {
-    'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, X-Amz-Date, Authorization, X-Api-Key',
-  };
-}
+// Export handler for Lambda
+export const handler = handle(app);

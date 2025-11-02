@@ -201,7 +201,7 @@ describe('RdbClient', () => {
       
       expect(mockDelete).toHaveBeenCalledWith('tables/users');
       expect(result).toEqual(expectedResponse);
-    });
+    }, 10000); // Increase timeout to 10 seconds for schema propagation wait
 
     it('should call listTables endpoint', async () => {
       // Mock backend response format

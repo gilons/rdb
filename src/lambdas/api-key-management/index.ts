@@ -1,4 +1,5 @@
-import { APIGatewayProxyEvent, APIGatewayProxyResult, Context } from 'aws-lambda';
+import { Hono } from 'hono';
+import { handle } from 'hono/aws-lambda';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
 import { 
@@ -32,72 +33,44 @@ interface ApiKeyItem {
   isActive: boolean;
 }
 
-/**
- * Lambda handler for API key management
- * Supports: CREATE API keys
- */
-export const handler = async (
-  event: APIGatewayProxyEvent,
-  context: Context
-): Promise<APIGatewayProxyResult> => {
-  console.log('Event:', JSON.stringify(event, null, 2));
+const app = new Hono();
 
-  const { httpMethod, body } = event;
-
-  try {
-    switch (httpMethod) {
-      case 'POST':
-        return await createApiKey(JSON.parse(body || '{}'));
-      default:
-        return {
-          statusCode: 405,
-          headers: getCorsHeaders(),
-          body: JSON.stringify({ error: 'Method not allowed' }),
-        };
-    }
-  } catch (error) {
-    console.error('Error:', error);
-    return {
-      statusCode: 500,
-      headers: getCorsHeaders(),
-      body: JSON.stringify({ 
-        error: 'Internal server error', 
-        message: error instanceof Error ? error.message : 'Unknown error'
-      }),
-    };
-  }
-};
+// Enable CORS
+app.use('*', async (c, next) => {
+  await next();
+  c.header('Access-Control-Allow-Origin', '*');
+  c.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  c.header('Access-Control-Allow-Headers', 'Content-Type, X-Amz-Date, Authorization, X-Api-Key');
+});
 
 /**
+ * POST /api-keys
  * Create a new API key
  */
-async function createApiKey(request: ApiKeyRequest): Promise<APIGatewayProxyResult> {
-  const { name, description } = request;
-
-  if (!name) {
-    return {
-      statusCode: 400,
-      headers: getCorsHeaders(),
-      body: JSON.stringify({ error: 'name is required' }),
-    };
-  }
-
-  // Generate API key
-  const apiKeyId = uuidv4();
-  const apiKey = generateApiKey();
-  const keyHash = hashApiKey(apiKey);
-  const timestamp = new Date().toISOString();
-
-  const apiKeyItem: ApiKeyItem = {
-    apiKeyId,
-    name,
-    description: description || '',
-    keyHash,
-    createdAt: timestamp,
-    isActive: true,
-  };
-
+app.post('/api-keys', async (c) => {
   try {
+    const request = await c.req.json<ApiKeyRequest>();
+    const { name, description } = request;
+
+    if (!name) {
+      return c.json({ error: 'name is required' }, 400);
+    }
+
+    // Generate API key
+    const apiKeyId = uuidv4();
+    const apiKey = generateApiKey();
+    const keyHash = hashApiKey(apiKey);
+    const timestamp = new Date().toISOString();
+
+    const apiKeyItem: ApiKeyItem = {
+      apiKeyId,
+      name,
+      description: description || '',
+      keyHash,
+      createdAt: timestamp,
+      isActive: true,
+    };
+
     // Store API key metadata in DynamoDB
     await dynamodb.send(new PutCommand({
       TableName: API_KEYS_TABLE_NAME,
@@ -116,23 +89,23 @@ async function createApiKey(request: ApiKeyRequest): Promise<APIGatewayProxyResu
       createdAt: timestamp,
     });
 
-    return {
-      statusCode: 201,
-      headers: getCorsHeaders(),
-      body: JSON.stringify({
-        message: 'API key created successfully',
-        apiKey, // Only return the actual key on creation
-        apiKeyId,
-        name,
-        description: description || '',
-        createdAt: timestamp,
-      }),
-    };
+    return c.json({
+      message: 'API key created successfully',
+      apiKey, // Only return the actual key on creation
+      apiKeyId,
+      name,
+      description: description || '',
+      createdAt: timestamp,
+    }, 201);
+
   } catch (error) {
     console.error('Failed to create API key:', error);
-    throw error;
+    return c.json({
+      error: 'Internal server error',
+      message: error instanceof Error ? error.message : 'Unknown error',
+    }, 500);
   }
-}
+});
 
 /**
  * Generate a secure API key
@@ -227,11 +200,5 @@ function getApiKeyHash(apiKey: string): string {
   return crypto.createHash('sha256').update(apiKey).digest('hex').substring(0, 8);
 }
 
-function getCorsHeaders() {
-  return {
-    'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, X-Amz-Date, Authorization, X-Api-Key',
-  };
-}
+// Export handler for Lambda
+export const handler = handle(app);

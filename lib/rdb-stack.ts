@@ -6,6 +6,8 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as sqs from 'aws-cdk-lib/aws-sqs';
+import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
@@ -50,6 +52,20 @@ export class RdbStack extends cdk.Stack {
       eventBridgeEnabled: true,
     });
 
+    // SQS queue for table decommissioning
+    const tableDecommissionQueue = new sqs.Queue(this, 'TableDecommissionQueue', {
+      queueName: 'rdb-table-decommission-queue',
+      visibilityTimeout: cdk.Duration.minutes(10), // Longer timeout for decommissioning
+      retentionPeriod: cdk.Duration.days(7),
+      deadLetterQueue: {
+        queue: new sqs.Queue(this, 'TableDecommissionDLQ', {
+          queueName: 'rdb-table-decommission-dlq',
+          retentionPeriod: cdk.Duration.days(14),
+        }),
+        maxReceiveCount: 3, // Retry up to 3 times before moving to DLQ
+      },
+    });
+
     // Secrets Manager for storing API key secrets
     const apiKeySecret = new secretsmanager.Secret(this, 'ApiKeySecret', {
       secretName: 'rdb-api-keys',
@@ -77,8 +93,11 @@ export class RdbStack extends cdk.Stack {
         },
       },
       logConfig: {
+        fieldLogLevel: appsync.FieldLogLevel.ALL, // Log all field resolver executions
         retention: logs.RetentionDays.ONE_WEEK,
+        excludeVerboseContent: false, // Include full request/response details
       },
+      xrayEnabled: true, // Enable X-Ray tracing for performance monitoring
     });
 
     // ========================================
@@ -121,6 +140,7 @@ export class RdbStack extends cdk.Stack {
         TABLES_TABLE_NAME: tablesTable.tableName,
         CONFIG_BUCKET_NAME: this.configBucket.bucketName,
         APPSYNC_API_ID: this.appSyncApi.apiId,
+        DECOMMISSION_QUEUE_URL: tableDecommissionQueue.queueUrl,
       },
     });
 
@@ -132,6 +152,8 @@ export class RdbStack extends cdk.Stack {
       environment: {
         TABLES_TABLE_NAME: tablesTable.tableName,
         APPSYNC_API_ID: this.appSyncApi.apiId,
+        APPSYNC_API_URL: this.appSyncApi.graphqlUrl,
+        APPSYNC_API_KEY: this.appSyncApi.apiKey || '',
       },
     });
 
@@ -159,6 +181,24 @@ export class RdbStack extends cdk.Stack {
       timeout: cdk.Duration.minutes(5)
     });
 
+    // Table decommission Lambda (async worker)
+    const tableDecommissionFunction = new NodejsFunction(this, 'TableDecommissionFunction', {
+      runtime: lambda.Runtime.NODEJS_18_X,
+      entry: 'src/lambdas/table-decommission/index.ts',
+      handler: 'handler',
+      environment: {
+        TABLES_TABLE_NAME: tablesTable.tableName,
+        CONFIG_BUCKET_NAME: this.configBucket.bucketName,
+        APPSYNC_API_ID: this.appSyncApi.apiId,
+      },
+      timeout: cdk.Duration.minutes(10), // Longer timeout for decommissioning
+    });
+
+    // Connect decommission lambda to SQS queue
+    tableDecommissionFunction.addEventSource(new SqsEventSource(tableDecommissionQueue, {
+      batchSize: 1, // Process one table at a time
+    }));
+
     // Lambda authorizer for API Gateway
     const authorizerFunction = new NodejsFunction(this, 'AuthorizerFunction', {
       runtime: lambda.Runtime.NODEJS_18_X,
@@ -178,6 +218,7 @@ export class RdbStack extends cdk.Stack {
       handler: 'handler',
       environment: {
         APPSYNC_API_ID: this.appSyncApi.apiId,
+        APPSYNC_API_GQL_URL: this.appSyncApi.graphqlUrl,
       },
       timeout: cdk.Duration.seconds(10)
     });
@@ -222,12 +263,20 @@ export class RdbStack extends cdk.Stack {
 
     tableManagementFunction.addToRolePolicy(dynamoDbPolicy);
     recordsManagementFunction.addToRolePolicy(dynamoDbPolicy);
+    tableDecommissionFunction.addToRolePolicy(dynamoDbPolicy);
+
+    // Grant DynamoDB permissions to decommission lambda
+    tablesTable.grantReadWriteData(tableDecommissionFunction);
 
     // Grant S3 permissions
     this.configBucket.grantReadWrite(tableManagementFunction);
     this.configBucket.grantRead(schemaSyncFunction);
+    this.configBucket.grantReadWrite(tableDecommissionFunction);
 
-    // Grant Secrets Manager permissions
+    // Grant SQS permissions to table management function
+    tableDecommissionQueue.grantSendMessages(tableManagementFunction);
+
+    // Secrets Manager permissions
     apiKeySecret.grantRead(authorizerFunction);
     apiKeySecret.grantRead(apiKeyManagementFunction);
     apiKeySecret.grantWrite(apiKeyManagementFunction);
@@ -268,6 +317,7 @@ export class RdbStack extends cdk.Stack {
 
     tableManagementFunction.addToRolePolicy(appSyncPolicy);
     schemaSyncFunction.addToRolePolicy(appSyncPolicy);
+    tableDecommissionFunction.addToRolePolicy(appSyncPolicy);
 
     // Grant Schema Sync function permission to pass the AppSync Service Role
     const passRolePolicy = new iam.PolicyStatement({
@@ -349,6 +399,12 @@ export class RdbStack extends cdk.Stack {
     });
 
     const recordResource = recordsResource.addResource('{recordId}');
+    recordResource.addMethod('GET', new apigateway.LambdaIntegration(recordsManagementFunction), {
+      authorizer,
+    });
+    recordResource.addMethod('PUT', new apigateway.LambdaIntegration(recordsManagementFunction), {
+      authorizer,
+    });
     recordResource.addMethod('DELETE', new apigateway.LambdaIntegration(recordsManagementFunction), {
       authorizer,
     });
