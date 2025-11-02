@@ -48,7 +48,7 @@ npm install aws-cdk-lib constructs
 
 ```typescript
 import * as cdk from 'aws-cdk-lib';
-import { RdbConstruct } from 'rdb-cdk';
+import { RdbConstruct } from '@realdb/cdk';
 
 export class MyStack extends cdk.Stack {
   constructor(scope: cdk.App, id: string, props?: cdk.StackProps) {

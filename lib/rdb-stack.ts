@@ -1,15 +1,15 @@
 import * as cdk from 'aws-cdk-lib';
 import { Construct } from 'constructs';
-import { RdbConstruct } from '@realdb/rdb-cdk';
+import { RdbConstruct } from '@realdb/cdk';
 
 /**
- * RDB Stack - Reference implementation using the @realdb/rdb-cdk construct
- * 
+ * RDB Stack - Reference implementation using the @realdb/cdk construct
+ *
  * This stack demonstrates how to use the RdbConstruct from the rdb-cdk package.
  * After publishing rdb-cdk to npm, users can install and use it like this:
  * 
  * \`\`\`typescript
- * import { RdbConstruct } from '@realdb/rdb-cdk';
+ * import { RdbConstruct } from '@realdb/cdk';
  * 
  * export class MyStack extends cdk.Stack {
  *   constructor(scope: Construct, id: string, props?: cdk.StackProps) {

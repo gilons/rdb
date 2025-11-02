@@ -1,74 +1,93 @@
-# RDB - Real-time Database SDK
+# RDB - Real-time Database
 
-🚀 **AWS-backed real-time database with GraphQL subscriptions powered by AppSync**
+🚀 **AWS-backed serverless real-time database with GraphQL subscriptions**
 
-Build modern applications with real-time data synchronization, scalable infrastructure, and a developer-friendly SDK.
+A complete serverless database solution built on AWS infrastructure, featuring real-time data synchronization, dynamic schema management, and a developer-friendly SDK.
 
-## Features
+[![npm version](https://badge.fury.io/js/@realdb%2Fclient.svg)](https://www.npmjs.com/package/@realdb/sdk)
+[![npm version](https://badge.fury.io/js/@realdb%2Frdb-cdk.svg)](https://www.npmjs.com/package/@realdb/cdk)
 
-- 🚀 **Real-time subscriptions** - Subscribe to data changes with WebSocket connections
-- 🔧 **Dynamic table creation** - Create and modify tables programmatically
-- 🔒 **Secure API key management** - Encrypted key storage with AWS Secrets Manager
-- 📊 **CRUD operations** - Full Create, Read, Update, Delete support
+## 📦 Packages
+
+This monorepo contains two published packages:
+
+### [@realdb/cdk](./packages/rdb-cdk)
+AWS CDK construct for deploying RDB infrastructure
+
+```bash
+npm install @realdb/cdk
+```
+
+### [@realdb/sdk](./sdk)
+TypeScript SDK for interacting with RDB
+
+```bash
+npm install @realdb/sdk
+```
+
+## ✨ Features
+
+- 🚀 **Real-time Subscriptions** - WebSocket connections for instant data updates via AWS AppSync
+- 🔧 **Dynamic Schema** - Create and modify tables programmatically without migrations
+- 🔒 **Secure by Default** - API key authentication with AWS Secrets Manager encryption
+- 📊 **Full CRUD Operations** - Complete Create, Read, Update, Delete support
 - 🌐 **Multi-platform** - Works in Node.js and browsers
-- ⚡ **GraphQL powered** - Built on AWS AppSync for real-time capabilities
-- 🏗️ **Infrastructure as Code** - Complete AWS CDK setup included
+- ⚡ **Serverless** - Auto-scaling infrastructure with pay-per-use pricing
+- 🏗️ **Infrastructure as Code** - Deploy with AWS CDK
+- 🎯 **Type-Safe** - Full TypeScript support
 
-## Architecture
+## 🏗️ Architecture
 
 RDB uses a modern serverless architecture on AWS:
 
-- **DynamoDB** - Scalable NoSQL database for data storage
-- **AppSync** - GraphQL API with real-time subscriptions
-- **API Gateway** - RESTful API with Lambda authorizer
-- **Lambda Functions** - Serverless compute for business logic
-- **S3** - Configuration storage for schema management
-- **Secrets Manager** - Secure API key storage
-- **CloudWatch** - Monitoring and event handling
+| Service | Purpose |
+|---------|---------|
+| **DynamoDB** | Metadata and data storage |
+| **AppSync** | GraphQL API with real-time subscriptions |
+| **API Gateway** | RESTful API with Lambda authorizer |
+| **Lambda** | Serverless compute for business logic |
+| **S3** | Schema configuration storage |
+| **SQS** | Asynchronous task queue with DLQ |
+| **Secrets Manager** | Encrypted API key storage |
+| **EventBridge** | Automated schema synchronization |
+| **CloudWatch** | Logging and monitoring |
 
-## Quick Start
+## 🚀 Quick Start
 
 ### 1. Deploy Infrastructure
 
-```bash
-# Install dependencies
-npm install
-
-# Build the project
-npm run build
-
-# Deploy AWS infrastructure
-npm run cdk deploy
-```
-
-### 2. Create API Key
-
 ```typescript
-import { createApiKey } from './src/sdk';
+import * as cdk from 'aws-cdk-lib';
+import { RdbConstruct } from '@realdb/cdk';
 
-const { apiKey, apiKeyId } = await createApiKey(
-  'https://your-api-endpoint.amazonaws.com',
-  'MyApp',
-  'API key for my application'
-);
+const app = new cdk.App();
+const stack = new cdk.Stack(app, 'RdbStack');
 
-console.log('Your API Key:', apiKey);
-```
-
-### 3. Initialize Client
-
-```typescript
-import { RdbClient } from './src/sdk';
-
-const rdb = new RdbClient({
-  apiKey: 'rdb_your_api_key_here',
-  endpoint: 'https://your-api-endpoint.amazonaws.com',
-  appSyncEndpoint: 'https://your-appsync-endpoint.amazonaws.com/graphql',
-  region: 'us-east-1'
+new RdbConstruct(stack, 'Rdb', {
+  resourceSuffix: 'prod',  // Optional: suffix for resource names
+  apiPrefix: 'v1',         // Optional: API route prefix
 });
 ```
 
-### 4. Create a Table
+Deploy:
+```bash
+npm install @realdb/cdk aws-cdk-lib constructs
+npm run cdk deploy
+```
+
+### 2. Initialize Client
+
+```typescript
+import { RdbClient } from '@realdb/sdk';
+
+const rdb = new RdbClient({
+  endpoint: 'https://your-api-gateway.amazonaws.com',
+  apiKey: 'your-api-key',
+  apiPrefix: 'v1',  // Optional: must match CDK deployment
+});
+```
+
+### 3. Create a Table
 
 ```typescript
 await rdb.createTable({
@@ -82,40 +101,45 @@ await rdb.createTable({
   ],
   subscriptions: [
     { event: 'create', filters: [{ field: 'active', operator: 'eq', value: true }] },
-    { event: 'update' }
-  ],
-  description: 'User management table'
+    { event: 'update' },
+    { event: 'delete' }
+  ]
 });
 ```
 
-### 5. Perform CRUD Operations
+### 4. Perform CRUD Operations
 
 ```typescript
 const usersTable = rdb.table('users');
 
-// Create a record
-await usersTable.create({
-  id: 'user1',
+// Create
+const user = await usersTable.create({
+  id: 'user123',
   email: 'john@example.com',
   name: 'John Doe',
   age: 30,
   active: true
 });
 
-// List records
-const users = await usersTable.list({ limit: 10 });
+// Read
+const singleUser = await usersTable.get('user123');
+const allUsers = await usersTable.list({ limit: 100 });
 
-// Delete a record
-await usersTable.delete('user1');
+// Update
+await usersTable.update('user123', { age: 31 });
+
+// Delete
+await usersTable.delete('user123');
 ```
 
-### 6. Subscribe to Real-time Updates
+### 5. Subscribe to Real-time Updates
 
 ```typescript
 const subscription = usersTable.subscribe({
+  event: 'create',
   filters: { active: true },
   onData: (data) => {
-    console.log('Real-time update:', data);
+    console.log('New user created:', data);
   },
   onError: (error) => {
     console.error('Subscription error:', error);
@@ -125,39 +149,160 @@ const subscription = usersTable.subscribe({
 // Start listening
 subscription.connect();
 
-// Disconnect when done
+// Clean up when done
 subscription.disconnect();
 ```
 
-## Development
+## 📚 Documentation
+
+### CDK Construct
+See [packages/rdb-cdk/README.md](./packages/rdb-cdk/README.md) for:
+- Advanced configuration options
+- Custom resource naming
+- API prefix setup
+- Multi-environment deployments
+- Security best practices
+
+### Client SDK
+See [sdk/README.md](./sdk/README.md) for:
+- Complete API reference
+- Real-time subscriptions
+- Error handling
+- Type definitions
+- Advanced usage patterns
+
+### Examples
+Check out [sdk/examples/nodejs-basic](./sdk/examples/nodejs-basic) for working examples:
+- Chat application
+- Real-time messaging
+- CRUD operations
+- Subscription handling
+
+## 🔧 Development
+
+### Repository Structure
+
+```
+rdb/
+├── packages/
+│   └── rdb-cdk/          # CDK construct package
+│       ├── src/          # Construct implementation
+│       ├── lambdas/      # Lambda function code
+│       └── schema/       # GraphQL schema
+├── sdk/                  # Client SDK package
+│   ├── src/              # SDK implementation
+│   └── examples/         # Usage examples
+├── lib/                  # CDK stack definitions
+├── bin/                  # CDK app entry point
+└── test/                 # Tests
+```
 
 ### Commands
 
 ```bash
-npm run build        # Compile TypeScript
-npm run watch        # Watch mode compilation
-npm run test         # Run tests
-npm run cdk deploy   # Deploy infrastructure
-npm run cdk destroy  # Remove infrastructure
+# Install dependencies
+npm install
+
+# Build all packages
+npm run build
+
+# Run tests
+npm run test
+
+# Deploy infrastructure
+npm run cdk deploy
+
+# Watch for changes
+npm run watch
+
+# Clean up AWS resources
+npm run cdk destroy
 ```
 
-## Examples
+### Publishing Packages
 
-Check `examples/usage-examples.ts` for comprehensive usage examples.
+```bash
+# Publish CDK construct
+cd packages/rdb-cdk
+npm run build
+npm publish
+
+# Publish SDK
+cd sdk
+npm run build
+npm publish
+```
+
+## 🔑 API Key Management
+
+### Creating API Keys
+
+API keys are created through the deployed API Gateway endpoint:
+
+```bash
+curl -X POST https://your-api-gateway.amazonaws.com/v1/api-keys \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "my-app",
+    "description": "API key for my application"
+  }'
+```
+
+Response:
+```json
+{
+  "apiKeyId": "uuid-here",
+  "apiKey": "rdb_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "name": "my-app",
+  "createdAt": "2025-11-02T12:00:00.000Z"
+}
+```
+
+⚠️ **Important**: Save the `apiKey` value - it cannot be retrieved later!
+
+## 🛡️ Security
+
+- API keys are encrypted at rest using AWS Secrets Manager
+- All Lambda functions have least-privilege IAM roles
+- API Gateway uses Lambda authorizer for request validation
+- AppSync uses API key authentication for subscriptions
+- DynamoDB tables support encryption at rest
+- S3 bucket has versioning enabled for schema rollback
+
+## 💰 Cost Considerations
+
+RDB uses serverless pay-per-use pricing. Approximate costs:
+
+- **DynamoDB**: $0.25 per million read/write requests + storage
+- **API Gateway**: $3.50 per million requests
+- **Lambda**: $0.20 per million requests + compute time
+- **AppSync**: $4.00 per million requests + real-time updates
+- **S3**: $0.023 per GB storage + requests
+- **Secrets Manager**: $0.40 per secret per month
+
+**Example**: 1M requests/month ≈ $5-10/month for typical usage
+
+## 🤝 Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## 📄 License
+
+MIT License - see [LICENSE](./LICENSE) for details
+
+## 🔗 Links
+
+- [npm: @realdb/sdk](https://www.npmjs.com/package/@realdb/sdk)
+- [npm: @realdb/cdk](https://www.npmjs.com/package/@realdb/cdk)
+- [GitHub Repository](https://github.com/gilons/rdb)
+- [Issues](https://github.com/gilons/rdb/issues)
+
+## 📞 Support
+
+For questions, issues, or feature requests:
+- Open an [issue](https://github.com/gilons/rdb/issues)
+- Email: gf.694765457@gmail.com
 
 ---
 
-**Built with ❤️ using AWS CDK, TypeScript, and modern serverless technologies.**our CDK TypeScript project
-
-This is a blank project for CDK development with TypeScript.
-
-The `cdk.json` file tells the CDK Toolkit how to execute your app.
-
-## Useful commands
-
-* `npm run build`   compile typescript to js
-* `npm run watch`   watch for changes and compile
-* `npm run test`    perform the jest unit tests
-* `npx cdk deploy`  deploy this stack to your default AWS account/region
-* `npx cdk diff`    compare deployed stack with current state
-* `npx cdk synth`   emits the synthesized CloudFormation template
+**Built with ❤️ using AWS CDK, TypeScript, and modern serverless technologies**

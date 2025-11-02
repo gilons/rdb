@@ -11,7 +11,7 @@
     "cdk": "cdk"
   },
   "dependencies": {
-    "@realdb/rdb-cdk": "^1.1.2",
+    "@realdb/cdk": "^1.1.2",
     "aws-cdk-lib": "2.190.0",
     "constructs": "^10.0.0"
   },
