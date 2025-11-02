@@ -5,20 +5,20 @@
 A complete serverless database solution built on AWS infrastructure, featuring real-time data synchronization, dynamic schema management, and a developer-friendly SDK.
 
 [![npm version](https://badge.fury.io/js/@realdb%2Fclient.svg)](https://www.npmjs.com/package/@realdb/sdk)
-[![npm version](https://badge.fury.io/js/@realdb%2Frdb-cdk.svg)](https://www.npmjs.com/package/@realdb/cdk)
+[![npm version](https://badge.fury.io/js/@realdb%2Fcdk.svg)](https://www.npmjs.com/package/@realdb/cdk)
 
 ## 📦 Packages
 
 This monorepo contains two published packages:
 
-### [@realdb/cdk](./packages/rdb-cdk)
+### [@realdb/cdk](./packages/cdk)
 AWS CDK construct for deploying RDB infrastructure
 
 ```bash
 npm install @realdb/cdk
 ```
 
-### [@realdb/sdk](./sdk)
+### [@realdb/sdk](./packages/sdk)
 TypeScript SDK for interacting with RDB
 
 ```bash
@@ -30,7 +30,6 @@ npm install @realdb/sdk
 - 🚀 **Real-time Subscriptions** - WebSocket connections for instant data updates via AWS AppSync
 - 🔧 **Dynamic Schema** - Create and modify tables programmatically without migrations
 - 🔒 **Secure by Default** - API key authentication with AWS Secrets Manager encryption
-- 📊 **Full CRUD Operations** - Complete Create, Read, Update, Delete support
 - 🌐 **Multi-platform** - Works in Node.js and browsers
 - ⚡ **Serverless** - Auto-scaling infrastructure with pay-per-use pricing
 - 🏗️ **Infrastructure as Code** - Deploy with AWS CDK
@@ -156,7 +155,7 @@ subscription.disconnect();
 ## 📚 Documentation
 
 ### CDK Construct
-See [packages/rdb-cdk/README.md](./packages/rdb-cdk/README.md) for:
+See [packages/cdk/README.md](./packages/cdk/README.md) for:
 - Advanced configuration options
 - Custom resource naming
 - API prefix setup
@@ -185,7 +184,7 @@ Check out [sdk/examples/nodejs-basic](./sdk/examples/nodejs-basic) for working e
 ```
 rdb/
 ├── packages/
-│   └── rdb-cdk/          # CDK construct package
+│   └── cdk/          # CDK construct package
 │       ├── src/          # Construct implementation
 │       ├── lambdas/      # Lambda function code
 │       └── schema/       # GraphQL schema
@@ -223,7 +222,7 @@ npm run cdk destroy
 
 ```bash
 # Publish CDK construct
-cd packages/rdb-cdk
+cd packages/cdk
 npm run build
 npm publish
 
