@@ -14,13 +14,15 @@ A TypeScript SDK for interacting with AWS-backed real-time databases. This SDK p
 ## Installation
 
 ```bash
-npm install @realdb/client
+npm install @realdb/sdk zod
 ```
 
-For GraphQL subscriptions, you'll also need:
+**Note**: Zod is required for schema validation and type safety.
+
+For GraphQL subscriptions (real-time features), you'll also need:
 
 ```bash
-npm install @apollo/client graphql
+npm install @apollo/client graphql ws
 ```
 
 ## Quick Start
@@ -28,7 +30,7 @@ npm install @apollo/client graphql
 ### Basic Setup
 
 ```typescript
-import { RdbClient } from '@realdb/client';
+import { RdbClient } from '@realdb/sdk';
 
 // Initialize with your API endpoint
 const client = new RdbClient({
@@ -47,6 +49,94 @@ const client = new RdbClient({
   apiPrefix: 'v1', // or 'rdb', 'api/v1', etc.
   // AppSync config is automatically fetched - no manual configuration needed
   disableRealtime: false, // Optional: Set to true to disable real-time features
+});
+```
+
+## Complete Example: Chat Application
+
+Here's a complete example showing table creation, CRUD operations, and real-time subscriptions:
+
+```typescript
+import { RdbClient } from '@realdb/sdk';
+import { z } from 'zod';
+
+// 1. Define your schema with Zod
+const MessageSchema = z.object({
+  id: z.string().optional(),        // Auto-generated
+  chatId: z.string().min(1),
+  content: z.string().min(1),
+  userId: z.string(),
+  username: z.string(),
+  timestamp: z.string().optional(),  // Auto-generated
+  isEdited: z.boolean().default(false),
+});
+
+type Message = z.infer<typeof MessageSchema>;
+
+// 2. Initialize client
+const client = new RdbClient({
+  endpoint: process.env.RDB_ENDPOINT!,
+  apiKey: process.env.RDB_API_KEY!,
+});
+
+// 3. Create table from schema
+await client.createTableFromSchema('messages', MessageSchema, {
+  description: 'Chat messages with real-time updates',
+  indexedFields: ['chatId', 'username'], // Enable filtering by these fields
+  subscriptions: [
+    {
+      filters: [
+        { field: 'chatId', type: 'string' },
+        { field: 'username', type: 'string' },
+      ]
+    }
+  ]
+});
+
+// 4. Get typed table instance
+const messages = client.tableWithSchema('messages', MessageSchema);
+
+// 5. Create messages (type-safe!)
+const result = await messages.create({
+  chatId: 'general',
+  content: 'Hello, World!',
+  userId: 'user1',
+  username: 'Alice',
+});
+
+if (result.success) {
+  console.log('Message created:', result.data);
+  // result.data is typed as Message
+}
+
+// 6. List messages
+const allMessages = await messages.list({ limit: 50 });
+if (allMessages.success) {
+  allMessages.data?.items.forEach(msg => {
+    console.log(`${msg.username}: ${msg.content}`);
+    // msg is typed as Message
+  });
+}
+
+// 7. Subscribe to real-time updates
+const subscription = messages.subscribe({
+  filters: { chatId: 'general' }, // Only messages from 'general' chat
+  onData: (message) => {
+    console.log('New message:', message);
+    // message is typed as Message
+  },
+  onError: (error) => {
+    console.error('Subscription error:', error);
+  }
+});
+
+// Start listening
+subscription.connect();
+
+// Clean up when done
+process.on('SIGINT', () => {
+  subscription.disconnect();
+  process.exit();
 });
 ```
 
@@ -116,17 +206,46 @@ updateSubscription.unsubscribe();
 deleteSubscription.unsubscribe();
 ```
 
-### Table Management
+### Table Management with Zod Schemas
 
 ```typescript
-// Create a new table
-await client.createTable({
-  tableName: 'products',
-  fields: [
-    { name: 'name', type: 'String', required: true },
-    { name: 'price', type: 'Float', required: true },
-    { name: 'description', type: 'String', required: false }
+import { z } from 'zod';
+
+// Define schema with Zod for type safety and validation
+const ProductSchema = z.object({
+  id: z.string().optional(), // Auto-generated
+  name: z.string().min(1),
+  price: z.number().positive(),
+  description: z.string().optional(),
+  inStock: z.boolean().default(true),
+  createdAt: z.string().optional()
+});
+
+type Product = z.infer<typeof ProductSchema>;
+
+// Create a new table from Zod schema
+await client.createTableFromSchema('products', ProductSchema, {
+  description: 'Product catalog',
+  indexedFields: ['name', 'inStock'], // Fields to index for queries
+  subscriptions: [
+    {
+      filters: [
+        { field: 'inStock', type: 'boolean' },
+        { field: 'name', type: 'string' }
+      ]
+    }
   ]
+});
+
+// Get typed table instance
+const products = client.tableWithSchema('products', ProductSchema);
+
+// Now all operations are type-safe!
+const result = await products.create({
+  name: 'Widget',
+  price: 29.99,
+  description: 'A great widget',
+  inStock: true
 });
 
 // List all tables
@@ -157,15 +276,53 @@ The main client class for interacting with the RDB service.
 
 #### Methods
 
-- `table(name: string): RdbTable` - Get a table instance
-- `createTable(config: TableConfig): Promise<ApiResponse>` - Create a new table
+**Table Management:**
+- `createTableFromSchema<T>(tableName: string, schema: z.ZodSchema<T>, options?: TableOptions): Promise<ApiResponse>` - Create a table from Zod schema with type safety
+- `tableWithSchema<T>(tableName: string, schema: z.ZodSchema<T>): TypedRdbTable<T>` - Get a typed table instance with schema validation
+- `table(name: string): RdbTable` - Get an untyped table instance (legacy)
 - `deleteTable(name: string): Promise<ApiResponse>` - Delete a table
 - `listTables(): Promise<ApiResponse>` - List all tables
 - `getTableSchema(name: string): Promise<TableSchema>` - Get table schema
 
-### RdbTable
+**TableOptions:**
+```typescript
+interface TableOptions {
+  description?: string;
+  indexedFields?: string[]; // Fields to index for efficient queries
+  subscriptions?: Array<{
+    filters?: Array<{
+      field: string;
+      type: 'string' | 'number' | 'boolean';
+    }>;
+  }>;
+}
+```
 
-Represents a specific table and provides CRUD operations.
+### TypedRdbTable<T>
+
+Represents a typed table with Zod schema validation. All operations are type-safe and validated against your schema.
+
+#### Methods
+
+- `create(data: Partial<T>): Promise<ApiResponse<T>>` - Create a record with validation
+- `get(id: string): Promise<ApiResponse<T>>` - Read a record by ID  
+- `update(id: string, data: Partial<T>): Promise<ApiResponse<T>>` - Update a record with validation
+- `delete(id: string): Promise<ApiResponse>` - Delete a record
+- `list(options?: QueryOptions): Promise<ApiResponse<{ items: T[] }>>` - List records with pagination
+- `subscribe(options: SubscriptionOptions): Subscription` - Subscribe to real-time updates
+
+**SubscriptionOptions:**
+```typescript
+interface SubscriptionOptions {
+  filters?: Record<string, any>; // Filter by indexed fields
+  onData: (data: T) => void;     // Type-safe callback
+  onError?: (error: Error) => void;
+}
+```
+
+### RdbTable (Legacy)
+
+Untyped table instance - prefer using `tableWithSchema` for type safety.
 
 #### Methods
 
@@ -173,17 +330,14 @@ Represents a specific table and provides CRUD operations.
 - `get(id: string): Promise<any>` - Read a record by ID  
 - `update(id: string, data: Record<string, any>): Promise<any>` - Update a record
 - `delete(id: string): Promise<void>` - Delete a record
-- `query(options?: QueryOptions): Promise<PaginatedResponse>` - Query records with filtering and pagination
-- `onCreated(callback: Function): Subscription` - Subscribe to new record events
-- `onUpdated(callback: Function): Subscription` - Subscribe to record update events  
-- `onDeleted(callback: Function): Subscription` - Subscribe to record deletion events
+- `query(options?: QueryOptions): Promise<PaginatedResponse>` - Query records
 
 ### Error Handling
 
 The SDK provides comprehensive error handling:
 
 ```typescript
-import { RdbClient } from '@realdb/client';
+import { RdbClient } from '@realdb/sdk';
 
 try {
   const client = new RdbClient({ endpoint: 'https://api.example.com', apiKey: 'key' });
@@ -202,7 +356,7 @@ Complete TypeScript examples are available in the `/examples/nodejs-basic/` dire
 ```bash
 # Clone the repository
 git clone https://github.com/gilons/rdb.git
-cd rdb/sdk/examples/nodejs-basic
+cd rdb/packages/sdk/examples/nodejs-basic
 
 # Install dependencies
 npm install

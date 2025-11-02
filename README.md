@@ -1,6 +1,20 @@
-# RDB - Real-time Database
+# RDB - Real-time Da### [@realdb/sdk](./sdk)
+TypeScript SDK for interacting with RDB
 
-🚀 **AWS-backed serverless real-time database with GraphQL subscriptions**
+```bash
+npm install @realdb/sdk zod
+```
+
+## ✨ Features
+
+- 🚀 **Real-time Subscriptions** - WebSocket connections for instant data updates via AWS AppSync
+- 🔧 **Dynamic Schema** - Create and modify tables programmatically with Zod validation
+- 🔒 **Secure by Default** - API key authentication with AWS Secrets Manager encryption
+- 📊 **Full CRUD Operations** - Complete Create, Read, Update, Delete support
+- 🌐 **Multi-platform** - Works in Node.js and browsers
+- ⚡ **Serverless** - Auto-scaling infrastructure with pay-per-use pricing
+- 🏗️ **Infrastructure as Code** - Deploy with AWS CDK
+- 🎯 **Type-Safe** - Full TypeScript support with Zod schema validation-backed serverless real-time database with GraphQL subscriptions**
 
 A complete serverless database solution built on AWS infrastructure, featuring real-time data synchronization, dynamic schema management, and a developer-friendly SDK.
 
@@ -86,49 +100,91 @@ const rdb = new RdbClient({
 });
 ```
 
-### 3. Create a Table
+### 3. Define Your Schema with Zod
 
 ```typescript
-await rdb.createTable({
-  tableName: 'users',
-  fields: [
-    { name: 'id', type: 'String', required: true, primary: true },
-    { name: 'email', type: 'String', required: true, indexed: true },
-    { name: 'name', type: 'String', required: true },
-    { name: 'age', type: 'Int' },
-    { name: 'active', type: 'Boolean' }
-  ],
+import { z } from 'zod';
+
+// Define your schema using Zod
+const UserSchema = z.object({
+  id: z.string().optional(), // Auto-generated if not provided
+  email: z.string().email(),
+  name: z.string().min(1),
+  age: z.number().int().positive().optional(),
+  active: z.boolean().default(true),
+  createdAt: z.string().optional(), // Auto-generated timestamp
+});
+
+type User = z.infer<typeof UserSchema>;
+```
+
+### 4. Create a Table from Schema
+
+```typescript
+// Create table with Zod schema validation
+await rdb.createTableFromSchema('users', UserSchema, {
+  description: 'User management table',
+  indexedFields: ['email'], // Fields to index for efficient queries
   subscriptions: [
-    { event: 'create', filters: [{ field: 'active', operator: 'eq', value: true }] },
-    { event: 'update' },
-    { event: 'delete' }
+    {
+      filters: [
+        { field: 'active', type: 'boolean' },
+        { field: 'email', type: 'string' }
+      ]
+    }
   ]
 });
 ```
 
-### 4. Perform CRUD Operations
+### 5. Perform Type-Safe CRUD Operations
 
 ```typescript
-const usersTable = rdb.table('users');
+// Get a typed table instance
+const usersTable = rdb.tableWithSchema('users', UserSchema);
 
-// Create
-const user = await usersTable.create({
-  id: 'user123',
+// Create - with full type safety and validation
+const createResult = await usersTable.create({
   email: 'john@example.com',
   name: 'John Doe',
   age: 30,
   active: true
 });
 
+if (createResult.success) {
+  console.log('User created:', createResult.data);
+  // createResult.data is fully typed as User
+}
+
 // Read
 const singleUser = await usersTable.get('user123');
 const allUsers = await usersTable.list({ limit: 100 });
 
-// Update
+// Update - validated against schema
 await usersTable.update('user123', { age: 31 });
 
 // Delete
 await usersTable.delete('user123');
+```
+
+### 6. Subscribe to Real-time Updates
+
+```typescript
+const subscription = usersTable.subscribe({
+  filters: { active: true }, // Filter by indexed fields
+  onData: (data) => {
+    console.log('Real-time update:', data);
+    // data is fully typed as User
+  },
+  onError: (error) => {
+    console.error('Subscription error:', error);
+  }
+});
+
+// Start listening
+subscription.connect();
+
+// Clean up when done
+subscription.disconnect();
 ```
 
 ### 5. Subscribe to Real-time Updates
@@ -171,7 +227,7 @@ See [sdk/README.md](./sdk/README.md) for:
 - Advanced usage patterns
 
 ### Examples
-Check out [sdk/examples/nodejs-basic](./sdk/examples/nodejs-basic) for working examples:
+Check out [packages/sdk/examples/nodejs-basic](.packages/sdk/examples/nodejs-basic) for working examples:
 - Chat application
 - Real-time messaging
 - CRUD operations
