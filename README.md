@@ -156,14 +156,14 @@ if (createResult.success) {
 }
 
 // Read
-const singleUser = await usersTable.get('user123');
+const singleUser = await usersTable.get(createResult.data.id);
 const allUsers = await usersTable.list({ limit: 100 });
 
 // Update - validated against schema
-await usersTable.update('user123', { age: 31 });
+await usersTable.update(createResult.data.id, { age: 31 });
 
 // Delete
-await usersTable.delete('user123');
+await usersTable.delete(createResult.data.id);
 ```
 
 ### 6. Subscribe to Real-time Updates
