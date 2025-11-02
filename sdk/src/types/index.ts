@@ -67,6 +67,8 @@ export interface RdbConfig {
   apiKey: string;
   endpoint: string;
   region?: string;
+  // Optional: API route prefix (e.g., 'v1', 'rdb', 'api/v1')
+  apiPrefix?: string;
   // Optional: Override automatic config fetching
   disableRealtime?: boolean;
 }

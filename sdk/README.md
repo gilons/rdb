@@ -35,6 +35,7 @@ const client = new RdbClient({
   endpoint: 'https://your-api.example.com',
   apiKey: 'your-api-key',
 });
+```
 
 ### Advanced Configuration
 
@@ -42,8 +43,24 @@ const client = new RdbClient({
 const client = new RdbClient({
   endpoint: 'https://your-api-gateway-endpoint.com',
   apiKey: 'your-api-key',
+  // Optional: API route prefix (if your RDB API is mounted under a prefix)
+  apiPrefix: 'v1', // or 'rdb', 'api/v1', etc.
   // AppSync config is automatically fetched - no manual configuration needed
   disableRealtime: false, // Optional: Set to true to disable real-time features
+});
+```
+
+**API Prefix Usage:**
+
+If your RDB infrastructure was deployed with a custom `apiPrefix`, you must include it in the SDK configuration:
+
+```typescript
+// If RDB was deployed with apiPrefix: 'rdb'
+// API routes will be: /rdb/tables, /rdb/tables/{name}/records, etc.
+const client = new RdbClient({
+  endpoint: 'https://api.example.com',
+  apiKey: 'your-key',
+  apiPrefix: 'rdb'
 });
 ```
 

@@ -391,9 +391,14 @@ export class RdbClient {
     this.config = { ...config } as InternalConfig;
     this.clientId = `${config.endpoint}-${config.apiKey.substring(0, 8)}`;
     
+    // Build the prefix URL with optional API prefix
+    const prefixUrl = config.apiPrefix 
+      ? `${config.endpoint.replace(/\/$/, '')}/${config.apiPrefix.replace(/^\//, '')}`
+      : config.endpoint;
+    
     // Initialize HTTP client with ky
     this.apiClient = ky.create({
-      prefixUrl: config.endpoint,
+      prefixUrl,
       headers: {
         'X-Api-Key': config.apiKey,
         'Content-Type': 'application/json',

@@ -107,16 +107,17 @@ type ${typeName}Connection {
   update${typeName}(${primaryField.name}: ${getGraphQLType(primaryField.type)}!, input: ${typeName}UpdateInput!): ${typeName}
   delete${typeName}(${primaryField.name}: ${getGraphQLType(primaryField.type)}!): ${typeName}`;
 
-    // Generate subscriptions
+    // Generate subscriptions (3 separate subscriptions: onCreate, onUpdate, onDelete)
     if (tableSubscriptions && tableSubscriptions.length > 0) {
-      tableSubscriptions.forEach(sub => {
-        const eventName = capitalize(sub.event || 'change');
-        const filterParams = sub.filters ? 
-          sub.filters.map(f => `${f.field}: ${getGraphQLType(f.type)}`).join(', ') : '';
-        
+      const sub = tableSubscriptions[0]; // Use first subscription config for all three events
+      const filterParams = sub.filters ? 
+        sub.filters.map(f => `${f.field}: ${getGraphQLType(f.type)}`).join(', ') : '';
+      
+      // Create separate subscription for each event type
+      ['Create', 'Update', 'Delete'].forEach(eventName => {
         subscriptions += `
   on${typeName}${eventName}${filterParams ? `(${filterParams})` : ''}: ${typeName}
-    @aws_subscribe(mutations: ["create${typeName}", "update${typeName}", "delete${typeName}"])`;
+    @aws_subscribe(mutations: ["${eventName.toLowerCase()}${typeName}"])`;
       });
     }
   });
@@ -147,18 +148,19 @@ export function generateSubscriptionQueries(table: TableItem, apiKey: string): a
   const prefixedTableName = `T${apiKey}_${table.tableName}`;
   const typeName = capitalize(prefixedTableName);
 
-  table.subscriptions.forEach(sub => {
-    const eventName = capitalize(sub.event || 'change');
-    
-    let filterArgs = '';
-    let filterVars = '';
-    if (sub.filters && sub.filters.length > 0) {
-      const filterDefs = sub.filters.map(f => `$${f.field}: ${getGraphQLType(f.type)}`).join(', ');
-      const filterParams = sub.filters.map(f => `${f.field}: $${f.field}`).join(', ');
-      filterArgs = `(${filterDefs})`;
-      filterVars = `(${filterParams})`;
-    }
+  const sub = table.subscriptions[0]; // Use first subscription config for filter parameters
+  
+  let filterArgs = '';
+  let filterVars = '';
+  if (sub.filters && sub.filters.length > 0) {
+    const filterDefs = sub.filters.map(f => `$${f.field}: ${getGraphQLType(f.type)}`).join(', ');
+    const filterParams = sub.filters.map(f => `${f.field}: $${f.field}`).join(', ');
+    filterArgs = `(${filterDefs})`;
+    filterVars = `(${filterParams})`;
+  }
 
+  // Generate 3 separate subscription queries: onCreate, onUpdate, onDelete
+  ['Create', 'Update', 'Delete'].forEach(eventName => {
     const queryName = `on${typeName}${eventName}`;
     subscriptionQueries[queryName] = `
 subscription ${queryName}${filterArgs} {

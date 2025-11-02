@@ -1,0 +1,67 @@
+{
+  "name": "@realdb/rdb-cdk",
+  "version": "1.1.2",
+  "description": "AWS CDK construct for deploying RDB (Real-time Database) infrastructure",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "scripts": {
+    "build": "rm -rf dist && tsc && cp -r schema dist/",
+    "watch": "tsc -w",
+    "test": "jest",
+    "clean": "rm -rf dist lib",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "rdb",
+    "realtime",
+    "database",
+    "cdk",
+    "aws-cdk",
+    "dynamodb",
+    "appsync",
+    "graphql",
+    "websocket",
+    "subscriptions"
+  ],
+  "author": "Giles Fokam",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gilons/rdb.git",
+    "directory": "packages/rdb-cdk"
+  },
+  "peerDependencies": {
+    "aws-cdk-lib": "^2.0.0",
+    "constructs": "^10.0.0"
+  },
+  "dependencies": {
+    "@aws-sdk/client-appsync": "^3.645.0",
+    "@aws-sdk/client-dynamodb": "^3.645.0",
+    "@aws-sdk/client-s3": "^3.645.0",
+    "@aws-sdk/client-secrets-manager": "^3.645.0",
+    "@aws-sdk/client-sqs": "^3.918.0",
+    "@aws-sdk/lib-dynamodb": "^3.645.0",
+    "hono": "^4.10.3",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.130",
+    "@types/node": "^20.0.0",
+    "@types/uuid": "^9.0.6",
+    "aws-cdk-lib": "^2.166.0",
+    "constructs": "^10.4.2",
+    "typescript": "^5.6.0"
+  },
+  "files": [
+    "dist/**/*",
+    "lambdas/**/*",
+    "utils/**/*",
+    "schema/**/*",
+    "types/**/*",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}
