@@ -1,8 +1,8 @@
-# RDB - Real-time Da### [@realdb/sdk](./sdk)
+# RDB - Real-time Da### [@realdb/client](./sdk)
 TypeScript SDK for interacting with RDB
 
 ```bash
-npm install @realdb/sdk zod
+npm install @realdb/client zod
 ```
 
 ## ✨ Features
@@ -18,7 +18,7 @@ npm install @realdb/sdk zod
 
 A complete serverless database solution built on AWS infrastructure, featuring real-time data synchronization, dynamic schema management, and a developer-friendly SDK.
 
-[![npm version](https://badge.fury.io/js/@realdb%2Fclient.svg)](https://www.npmjs.com/package/@realdb/sdk)
+[![npm version](https://badge.fury.io/js/@realdb%2Fclient.svg)](https://www.npmjs.com/package/@realdb/client)
 [![npm version](https://badge.fury.io/js/@realdb%2Fcdk.svg)](https://www.npmjs.com/package/@realdb/cdk)
 
 ## 📦 Packages
@@ -32,11 +32,11 @@ AWS CDK construct for deploying RDB infrastructure
 npm install @realdb/cdk
 ```
 
-### [@realdb/sdk](./packages/sdk)
+### [@realdb/client](./packages/sdk)
 TypeScript SDK for interacting with RDB
 
 ```bash
-npm install @realdb/sdk
+npm install @realdb/client
 ```
 
 ## ✨ Features
@@ -91,7 +91,7 @@ npm run cdk deploy
 ### 2. Initialize Client
 
 ```typescript
-import { RdbClient } from '@realdb/sdk';
+import { RdbClient } from '@realdb/client';
 
 const rdb = new RdbClient({
   endpoint: 'https://your-api-gateway.amazonaws.com',
@@ -326,7 +326,7 @@ MIT License - see [LICENSE](./LICENSE) for details
 
 ## 🔗 Links
 
-- [npm: @realdb/sdk](https://www.npmjs.com/package/@realdb/sdk)
+- [npm: @realdb/client](https://www.npmjs.com/package/@realdb/client)
 - [npm: @realdb/cdk](https://www.npmjs.com/package/@realdb/cdk)
 - [GitHub Repository](https://github.com/gilons/rdb)
 - [Issues](https://github.com/gilons/rdb/issues)

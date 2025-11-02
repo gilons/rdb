@@ -14,7 +14,7 @@ A TypeScript SDK for interacting with AWS-backed real-time databases. This SDK p
 ## Installation
 
 ```bash
-npm install @realdb/sdk zod
+npm install @realdb/client zod
 ```
 
 **Note**: Zod is required for schema validation and type safety.
@@ -30,7 +30,7 @@ npm install @apollo/client graphql ws
 ### Basic Setup
 
 ```typescript
-import { RdbClient } from '@realdb/sdk';
+import { RdbClient } from '@realdb/client';
 
 // Initialize with your API endpoint
 const client = new RdbClient({
@@ -57,7 +57,7 @@ const client = new RdbClient({
 Here's a complete example showing table creation, CRUD operations, and real-time subscriptions:
 
 ```typescript
-import { RdbClient } from '@realdb/sdk';
+import { RdbClient } from '@realdb/client';
 import { z } from 'zod';
 
 // 1. Define your schema with Zod
@@ -337,7 +337,7 @@ Untyped table instance - prefer using `tableWithSchema` for type safety.
 The SDK provides comprehensive error handling:
 
 ```typescript
-import { RdbClient } from '@realdb/sdk';
+import { RdbClient } from '@realdb/client';
 
 try {
   const client = new RdbClient({ endpoint: 'https://api.example.com', apiKey: 'key' });
