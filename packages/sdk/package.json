@@ -55,7 +55,7 @@
   "bugs": {
     "url": "https://github.com/gilons/rdb/issues"
   },
-  "homepage": "https://github.com/gilons/rdb/tree/main/sdk#readme",
+  "homepage": "https://github.com/gilons/rdb/tree/main/packages/sdk#readme",
   "dependencies": {
     "@types/ws": "^8.18.1",
     "ky": "^1.1.3",
