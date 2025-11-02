@@ -170,27 +170,6 @@ await usersTable.delete(createResult.data.id);
 
 ```typescript
 const subscription = usersTable.subscribe({
-  filters: { active: true }, // Filter by indexed fields
-  onData: (data) => {
-    console.log('Real-time update:', data);
-    // data is fully typed as User
-  },
-  onError: (error) => {
-    console.error('Subscription error:', error);
-  }
-});
-
-// Start listening
-subscription.connect();
-
-// Clean up when done
-subscription.disconnect();
-```
-
-### 5. Subscribe to Real-time Updates
-
-```typescript
-const subscription = usersTable.subscribe({
   event: 'create',
   filters: { active: true },
   onData: (data) => {
