@@ -1,4 +1,4 @@
-# RDB - Real-time Da
+# RDB - Real-time Data
 ### [@realdb/client](./sdk)
 TypeScript SDK for interacting with RDB
 
