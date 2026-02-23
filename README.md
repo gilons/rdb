@@ -1,5 +1,5 @@
 # RDB - Real-time Database
-### [@realdb/client](./sdk)
+### [@realdb/client](./packages/sdk)
 TypeScript SDK for interacting with RDB
 
 ```bash

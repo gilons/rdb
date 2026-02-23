@@ -6,12 +6,26 @@ import { TableField, TableConfig } from '../types';
  */
 
 /**
+ * Check if a value is a ZodObject using duck-typing
+ * This works across different Zod instances/versions
+ */
+function isZodObject(schema: any): schema is z.ZodObject<any> {
+  return (
+    schema &&
+    typeof schema === 'object' &&
+    typeof schema.shape === 'object' &&
+    typeof schema.parse === 'function' &&
+    (schema._def?.typeName === 'ZodObject' || schema.constructor?.name === 'ZodObject')
+  );
+}
+
+/**
  * Convert a Zod schema to RDB TableField array
  * @param schema The Zod schema to convert
  * @returns Array of TableField definitions
  */
 export function zodSchemaToFields(schema: z.ZodTypeAny): TableField[] {
-  if (!(schema instanceof z.ZodObject)) {
+  if (!isZodObject(schema)) {
     throw new Error('Schema must be a ZodObject');
   }
 
@@ -29,43 +43,52 @@ export function zodSchemaToFields(schema: z.ZodTypeAny): TableField[] {
 }
 
 /**
+ * Get the Zod type name using duck-typing (works across Zod versions)
+ */
+function getZodTypeName(schema: any): string | undefined {
+  return schema?._def?.typeName || schema?.constructor?.name;
+}
+
+/**
  * Convert a single Zod field to a TableField
  */
 function zodFieldToTableField(name: string, schema: z.ZodTypeAny): TableField | null {
   // Handle optional fields
   let isOptional = false;
   let unwrapped = schema;
+  const typeName = getZodTypeName(schema);
 
-  if (schema instanceof z.ZodOptional) {
+  if (typeName === 'ZodOptional') {
     isOptional = true;
     unwrapped = (schema as any)._def.innerType;
   }
 
   // Handle default fields
-  if (schema instanceof z.ZodDefault) {
-    unwrapped = (schema as any)._def.innerType;
+  if (getZodTypeName(unwrapped) === 'ZodDefault') {
+    unwrapped = (unwrapped as any)._def.innerType;
   }
 
   // Determine the backend type (capitalized for TableField interface)
   let backendType: 'String' | 'Int' | 'Float' | 'Boolean' | 'Array';
   let indexed = false;
   let primary = false;
+  const unwrappedTypeName = getZodTypeName(unwrapped);
 
-  if (unwrapped instanceof z.ZodString) {
+  if (unwrappedTypeName === 'ZodString') {
     backendType = 'String';
-  } else if (unwrapped instanceof z.ZodNumber) {
+  } else if (unwrappedTypeName === 'ZodNumber') {
     // Check if it's an integer or float
     const checks = (unwrapped as any)._def.checks || [];
     const hasIntCheck = checks.some((check: any) => check.kind === 'int');
     backendType = hasIntCheck ? 'Int' : 'Float';
-  } else if (unwrapped instanceof z.ZodBoolean) {
+  } else if (unwrappedTypeName === 'ZodBoolean') {
     backendType = 'Boolean';
-  } else if (unwrapped instanceof z.ZodArray) {
+  } else if (unwrappedTypeName === 'ZodArray') {
     backendType = 'Array';
-  } else if (unwrapped instanceof z.ZodDate) {
+  } else if (unwrappedTypeName === 'ZodDate') {
     // Dates are stored as strings in the backend
     backendType = 'String';
-  } else if (unwrapped instanceof z.ZodEnum) {
+  } else if (unwrappedTypeName === 'ZodEnum') {
     // Enums are stored as strings
     backendType = 'String';
   } else {

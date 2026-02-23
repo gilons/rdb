@@ -6,6 +6,7 @@
 import {
   AppSyncClient,
   CreateDataSourceCommand,
+  UpdateDataSourceCommand,
   CreateResolverCommand,
   UpdateResolverCommand,
   DeleteResolverCommand,
@@ -23,12 +24,13 @@ const APPSYNC_API_ID = process.env.APPSYNC_API_ID!;
 const APPSYNC_SERVICE_ROLE_ARN = process.env.APPSYNC_SERVICE_ROLE_ARN!;
 
 /**
- * Create AppSync data source for a DynamoDB table
+ * Create or update AppSync data source for a DynamoDB table
+ * If the data source exists but points to a different table, it will be updated
  */
 export async function createDataSource(tableId: string, dataSourceName: string): Promise<void> {
   const tableName = `rdb-data-${tableId}`;
 
-  console.log(`Creating data source: ${dataSourceName} for table: ${tableName}`);
+  console.log(`Creating/updating data source: ${dataSourceName} for table: ${tableName}`);
 
   try {
     await appSync.send(new CreateDataSourceCommand({
@@ -45,7 +47,24 @@ export async function createDataSource(tableId: string, dataSourceName: string):
   } catch (error: any) {
     if (error.name === 'ConflictException' || 
         (error.name === 'BadRequestException' && error.message?.includes('already exists'))) {
-      console.log(`✓ Data source ${dataSourceName} already exists`);
+      // Data source exists - update it to point to the correct table
+      console.log(`Data source ${dataSourceName} exists, updating to point to ${tableName}...`);
+      try {
+        await appSync.send(new UpdateDataSourceCommand({
+          apiId: APPSYNC_API_ID,
+          name: dataSourceName,
+          type: 'AMAZON_DYNAMODB',
+          dynamodbConfig: {
+            tableName: tableName,
+            awsRegion: process.env.AWS_REGION || 'us-east-1',
+          },
+          serviceRoleArn: APPSYNC_SERVICE_ROLE_ARN
+        }));
+        console.log(`✓ Data source ${dataSourceName} updated successfully`);
+      } catch (updateError: any) {
+        console.error(`Failed to update data source ${dataSourceName}:`, updateError);
+        throw updateError;
+      }
       return;
     }
     throw error;
@@ -416,5 +435,74 @@ function generateResponseTemplate(operation: string): string {
 
     default:
       return '$util.toJson($ctx.result)';
+  }
+}
+
+/**
+ * Create or get the NONE data source for direct publish (no DynamoDB)
+ * This is used for fast real-time streaming without database writes
+ */
+export async function createNoneDataSource(dataSourceName: string = 'NONE_DS'): Promise<void> {
+  console.log(`Creating NONE data source: ${dataSourceName}`);
+
+  try {
+    await appSync.send(new CreateDataSourceCommand({
+      apiId: APPSYNC_API_ID,
+      name: dataSourceName,
+      type: 'NONE',
+    }));
+    console.log(`✓ NONE data source ${dataSourceName} created successfully`);
+  } catch (error: any) {
+    if (error.name === 'ConflictException' || 
+        (error.name === 'BadRequestException' && error.message?.includes('already exists'))) {
+      console.log(`NONE data source ${dataSourceName} already exists`);
+      return;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Create resolver for publish mutation (direct to subscription, no DynamoDB)
+ */
+export async function createPublishResolver(
+  typeName: string,
+  fieldName: string,
+  dataSourceName: string = 'NONE_DS'
+): Promise<void> {
+  // Simple pass-through template for NONE data source
+  const requestTemplate = `{
+  "version": "2017-02-28",
+  "payload": $util.toJson($ctx.args.input)
+}`;
+
+  const responseTemplate = `$util.toJson($ctx.result)`;
+
+  try {
+    await appSync.send(new CreateResolverCommand({
+      apiId: APPSYNC_API_ID,
+      typeName: 'Mutation',
+      fieldName,
+      dataSourceName,
+      requestMappingTemplate: requestTemplate,
+      responseMappingTemplate: responseTemplate,
+    }));
+    console.log(`✓ Created publish resolver: Mutation.${fieldName}`);
+  } catch (error: any) {
+    if (error.name === 'ConflictException' || 
+        (error.name === 'BadRequestException' && error.message?.includes('Only one resolver'))) {
+      // Update existing resolver
+      await appSync.send(new UpdateResolverCommand({
+        apiId: APPSYNC_API_ID,
+        typeName: 'Mutation',
+        fieldName,
+        dataSourceName,
+        requestMappingTemplate: requestTemplate,
+        responseMappingTemplate: responseTemplate,
+      }));
+      console.log(`✓ Updated publish resolver: Mutation.${fieldName}`);
+    } else {
+      throw error;
+    }
   }
 }

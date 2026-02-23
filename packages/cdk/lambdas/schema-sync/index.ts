@@ -3,7 +3,9 @@ import { S3Client, GetObjectCommand, ListObjectsV2Command, ListObjectsV2CommandO
 import { 
   updateAppSyncSchema, 
   createDataSource, 
-  createTableResolvers 
+  createTableResolvers,
+  createNoneDataSource,
+  createPublishResolver
 } from '../../utils/appsync-utils';
 import { capitalize, getGraphQLType } from '../../utils';
 
@@ -283,7 +285,9 @@ function generateSchemaPartsForTable(table: any, apiKeyHash: string): {
   const mutations = [
     `create${typeName}(input: ${typeName}Input!): ${typeName}`,
     `update${typeName}(${primaryKeyField.name}: ${pkType}!, input: ${typeName}UpdateInput!): ${typeName}`,
-    `delete${typeName}(${primaryKeyField.name}: ${pkType}!): ${typeName}`
+    `delete${typeName}(${primaryKeyField.name}: ${pkType}!): ${typeName}`,
+    // Direct publish mutation - bypasses DynamoDB for fast real-time streaming
+    `publish${typeName}(input: ${typeName}Input!): ${typeName}`
   ];
 
   // Generate subscription parts - ALWAYS create onCreate, onUpdate, onDelete
@@ -302,10 +306,10 @@ function generateSchemaPartsForTable(table: any, apiKeyHash: string): {
     }
   }
   
-  // Always generate 3 subscriptions, each listening to its own mutation
+  // Generate subscriptions - publish mutation triggers the Update subscription for streaming
   subscriptions.push(
     `on${typeName}Create${filterArgs}: ${typeName}\n    @aws_subscribe(mutations: ["create${typeName}"])`,
-    `on${typeName}Update${filterArgs}: ${typeName}\n    @aws_subscribe(mutations: ["update${typeName}"])`,
+    `on${typeName}Update${filterArgs}: ${typeName}\n    @aws_subscribe(mutations: ["update${typeName}", "publish${typeName}"])`,
     `on${typeName}Delete${filterArgs}: ${typeName}\n    @aws_subscribe(mutations: ["delete${typeName}"])`
   );
 
@@ -317,6 +321,14 @@ function generateSchemaPartsForTable(table: any, apiKeyHash: string): {
  */
 async function createResolversForApiKey(tables: any[], apiKeyHash: string): Promise<void> {
   console.log(`Creating resolvers for API key hash: ${apiKeyHash}, tables count: ${tables.length}`);
+  
+  // Create NONE data source for direct publish (shared across all tables)
+  try {
+    await createNoneDataSource('NONE_DS');
+  } catch (error) {
+    console.error('Failed to create NONE data source:', error);
+    // Continue - it may already exist
+  }
   
   for (const table of tables) {
     // GraphQL type names cannot start with numbers, so prefix with 'T'
@@ -332,6 +344,9 @@ async function createResolversForApiKey(tables: any[], apiKeyHash: string): Prom
 
       // Create all resolvers using shared utility
       await createTableResolvers(table, apiKeyHash, typeName, dataSourceName);
+
+      // Create publish resolver (uses NONE data source for fast streaming)
+      await createPublishResolver(typeName, `publish${typeName}`, 'NONE_DS');
 
     } catch (error) {
       console.error(`Failed to create resolvers for table ${table.tableName} (${apiKeyHash}):`, error);

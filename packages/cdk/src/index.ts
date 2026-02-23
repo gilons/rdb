@@ -6,4 +6,15 @@
  * @packageDocumentation
  */
 
-export { RdbConstruct, RdbConstructProps } from './rdb-construct';
+export { RdbConstruct, RdbConstructProps, InitialTableConfig } from './rdb-construct';
+
+// Re-export types for convenience
+export type { 
+  TableField, 
+  TableConfig, 
+  TableSubscription,
+  TableItem,
+  RdbConfig,
+  SubscriptionOptions,
+  QueryOptions
+} from '../types';

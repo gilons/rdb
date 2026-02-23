@@ -16,20 +16,57 @@ import {
   inferSchemaFromTableMetadata
 } from './utils/zod-schema';
 
-// WebSocket polyfill for Node.js
-let WebSocket: any;
-try {
-  // Try to detect environment and load appropriate WebSocket
+/**
+ * Get the WebSocket implementation for the current environment.
+ * Priority:
+ * 1. Browser/React Native global WebSocket
+ * 2. Node.js 'ws' package (optional peer dependency)
+ */
+function getWebSocketImpl(): typeof WebSocket | null {
+  // Check for browser/React Native WebSocket (globalThis.WebSocket)
   if (typeof globalThis !== 'undefined' && globalThis.WebSocket) {
-    WebSocket = globalThis.WebSocket;
-  } else if (typeof global !== 'undefined' && !(global as any).WebSocket) {
-    // Node.js environment - try to load ws package
-    WebSocket = require('ws');
-  } else {
-    WebSocket = (global as any).WebSocket || (globalThis as any).WebSocket;
+    return globalThis.WebSocket;
   }
-} catch (error) {
-  console.warn('[RDB] WebSocket not available. Install "ws" package for Node.js support.');
+  
+  // Check for React Native WebSocket (global.WebSocket)
+  if (typeof global !== 'undefined' && (global as any).WebSocket) {
+    return (global as any).WebSocket;
+  }
+  
+  // Node.js environment - try to load ws package dynamically
+  // This is wrapped to avoid bundler issues in browser/React Native
+  if (typeof process !== 'undefined' && process.versions?.node) {
+    try {
+      // Dynamic require to prevent bundlers from including ws
+      const ws = require('ws');
+      return ws;
+    } catch (error) {
+      console.warn('[RDB] WebSocket not available. Install "ws" package for Node.js support: npm install ws');
+    }
+  }
+  
+  return null;
+}
+
+// Get WebSocket implementation once
+const WebSocketImpl = getWebSocketImpl();
+
+/**
+ * Base64 encode helper that works across all environments
+ * (Node.js, browsers, and React Native)
+ */
+function base64Encode(str: string): string {
+  // Try browser/React Native btoa first (most common case)
+  if (typeof btoa === 'function') {
+    return btoa(str);
+  }
+  
+  // Fallback to Node.js Buffer
+  if (typeof Buffer !== 'undefined') {
+    return Buffer.from(str).toString('base64');
+  }
+  
+  throw new Error('[RDB] No base64 encoding method available');
 }
 
 // Real-time subscription message types
@@ -63,6 +100,9 @@ class RealtimeClient {
   private reconnectDelay = 1000; // Start with 1 second
 
   constructor(url: string, apiKey: string) {
+    if (!WebSocketImpl) {
+      throw new Error('[RDB] WebSocket not available. In Node.js, install "ws" package: npm install ws');
+    }
     this.url = url;
     this.apiKey = apiKey;
   }
@@ -97,20 +137,16 @@ class RealtimeClient {
         };
         
         // Base64 encode the header and payload
-        const encodedHeader = this.base64Encode(JSON.stringify(headerObj));
-        const encodedPayload = this.base64Encode('{}');
+        const encodedHeader = base64Encode(JSON.stringify(headerObj));
+        const encodedPayload = base64Encode('{}');
         
         // Add query parameters for authentication
         const wsUrl = `${baseUrl}?header=${encodeURIComponent(encodedHeader)}&payload=${encodeURIComponent(encodedPayload)}`;
         
-        console.log('[RDB] Connecting to real-time WebSocket with auth params');
-        
         // Create WebSocket connection with GraphQL subprotocols
-        this.ws = new WebSocket(wsUrl, ['graphql-ws']);
+        this.ws = new WebSocketImpl!(wsUrl, ['graphql-ws']);
 
         this.ws.onopen = () => {
-          console.log('[RDB] Real-time WebSocket connected');
-          
           // Send connection_init (no auth needed here, it's in the URL)
           this.send({
             type: 'connection_init'
@@ -120,13 +156,11 @@ class RealtimeClient {
         this.ws.onmessage = (event: any) => {
           try {
             const message: RealtimeMessage = JSON.parse(event.data);
-            console.log('[RDB] Received message:', message);
             this.handleMessage(message);
             
             if (message.type === 'connection_ack') {
               this.connectionState = 'connected';
               this.reconnectAttempts = 0;
-              console.log('[RDB] Real-time WebSocket connection acknowledged');
               resolve();
             } else if (message.type === 'connection_error') {
               console.error('[RDB] Real-time connection error:', message.payload);
@@ -137,23 +171,21 @@ class RealtimeClient {
           }
         };
 
-        this.ws.onclose = (event: any) => {
-          console.log('[RDB] Real-time WebSocket closed:', event.code, event.reason);
+        this.ws.onclose = (_event: any) => {
           this.connectionState = 'disconnected';
           
           // Attempt to reconnect if not intentionally closed
-          if (event.code !== 1000 && this.reconnectAttempts < this.maxReconnectAttempts) {
+          if (_event.code !== 1000 && this.reconnectAttempts < this.maxReconnectAttempts) {
             setTimeout(() => this.reconnect(), this.reconnectDelay * Math.pow(2, this.reconnectAttempts));
           }
         };
 
         this.ws.onerror = (error: any) => {
-          console.error('[RDB] Real-time WebSocket error:', JSON.stringify(error));
+          console.error('[RDB] Real-time WebSocket error:', error?.message || error);
           this.connectionState = 'disconnected';
           
           // Try a different approach if the first one fails
           if (this.reconnectAttempts === 0) {
-            console.log('[RDB] Trying alternative connection method...');
             this.connectWithAuth().then(resolve).catch(reject);
           } else {
             reject(error);
@@ -183,18 +215,28 @@ class RealtimeClient {
           baseUrl = baseUrl.replace(/\/$/, '') + '/graphql';
         }
                 
-        console.log('[RDB] Trying alternative connection method');
-        
-        this.ws = new WebSocket(baseUrl, ['graphql-ws'], {
-          headers: {
-            'host': new URL(this.url).host,
-            'x-api-key': this.apiKey
-          }
-        });
+        // Note: The headers option only works with Node.js ws package, not browser/React Native WebSocket
+        // In browser/React Native, we use the URL parameter approach from the main connect() method
+        // This fallback is primarily for Node.js environments
+        if (typeof process !== 'undefined' && process.versions?.node) {
+          // Node.js: can pass headers option to ws
+          this.ws = new (WebSocketImpl as any)(baseUrl, ['graphql-ws'], {
+            headers: {
+              'host': new URL(this.url).host,
+              'x-api-key': this.apiKey
+            }
+          });
+        } else {
+          // Browser/React Native: no headers option, use URL params
+          const host = new URL(this.url).host;
+          const headerObj = { host, 'x-api-key': this.apiKey };
+          const encodedHeader = base64Encode(JSON.stringify(headerObj));
+          const encodedPayload = base64Encode('{}');
+          const wsUrlWithAuth = `${baseUrl}?header=${encodeURIComponent(encodedHeader)}&payload=${encodeURIComponent(encodedPayload)}`;
+          this.ws = new WebSocketImpl!(wsUrlWithAuth, ['graphql-ws']);
+        }
 
         this.ws.onopen = () => {
-          console.log('[RDB] Real-time WebSocket connected with auth headers');
-          
           // Send connection_init
           this.send({
             type: 'connection_init'
@@ -204,30 +246,27 @@ class RealtimeClient {
         this.ws.onmessage = (event: any) => {
           try {
             const message: RealtimeMessage = JSON.parse(event.data);
-            console.log('[RDB] Received auth message:', message);
             this.handleMessage(message);
             
             if (message.type === 'connection_ack') {
               this.connectionState = 'connected';
               this.reconnectAttempts = 0;
-              console.log('[RDB] Real-time WebSocket connection acknowledged with auth');
               resolve();
             } else if (message.type === 'connection_error') {
-              console.error('[RDB] Real-time connection error with auth:', message.payload);
+              console.error('[RDB] Real-time connection error:', message.payload);
               reject(new Error(JSON.stringify(message.payload)));
             }
           } catch (error) {
-            console.error('[RDB] Failed to parse WebSocket message with auth:', error);
+            console.error('[RDB] Failed to parse WebSocket message:', error);
           }
         };
 
-        this.ws.onclose = (event: any) => {
-          console.log('[RDB] Real-time WebSocket with auth closed:', event.code, event.reason);
+        this.ws.onclose = () => {
           this.connectionState = 'disconnected';
         };
 
         this.ws.onerror = (error: any) => {
-          console.error('[RDB] Real-time WebSocket with auth error:', error);
+          console.error('[RDB] Real-time WebSocket error:', error?.message || error);
           this.connectionState = 'disconnected';
           reject(error);
         };
@@ -239,17 +278,6 @@ class RealtimeClient {
   }
 
   /**
-   * Base64 encode helper
-   */
-  private base64Encode(str: string): string {
-    try {
-      // Try Node.js Buffer first
-      return Buffer.from(str).toString('base64');
-    } catch {
-      // Fallback to browser btoa
-      return btoa(str);
-    }
-  }  /**
    * Reconnect with exponential backoff
    */
   private async reconnect(): Promise<void> {
@@ -258,7 +286,6 @@ class RealtimeClient {
     }
 
     this.reconnectAttempts++;
-    console.log(`[RDB] Reconnecting to AppSync WebSocket (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
     
     try {
       await this.connect();
@@ -290,7 +317,7 @@ class RealtimeClient {
         // Connection acknowledged - handled in onmessage
         break;
         
-      case 'data':
+      case 'data':        
         if (message.id && this.subscriptions.has(message.id)) {
           const subscription = this.subscriptions.get(message.id)!;
           if (subscription.onData && message.payload?.data) {
@@ -319,7 +346,8 @@ class RealtimeClient {
         break;
         
       default:
-        console.log('[RDB] Unknown AppSync message type:', message.type);
+        // Unknown message type - ignore silently
+        break;
     }
   }
 
@@ -330,7 +358,6 @@ class RealtimeClient {
     this.subscriptions.set(handler.id, handler);
     
     if (this.connectionState === 'connected') {
-      console.log('[RDB] Starting subscription:', handler.id);
       this.send({
         id: handler.id,
         type: 'start',
@@ -346,9 +373,8 @@ class RealtimeClient {
           }
         }
       });
-    } else {
-      console.log('[RDB] WebSocket not connected, subscription will start when connected');
     }
+    // If not connected, subscription will start when connection is established
   }
 
   /**
@@ -412,7 +438,13 @@ export class RdbClient {
       hooks: {
         beforeError: [
           async (error: any) => {
-            console.warn('error: ', await error.response.json());
+            // Silently capture error details for the error message
+            try {
+              const errorJson = await error.response.json();
+              error.details = errorJson;
+            } catch {
+              // Ignore JSON parsing errors
+            }
             const { response } = error;
             if (response && response.body) {
               error.name = 'RdbApiError';
@@ -505,9 +537,35 @@ export class RdbClient {
     // Connect to real-time service
     try {
       await this.realtimeClient.connect();
-      console.log('[RDB] Real-time WebSocket client initialized successfully');
     } catch (error) {
       console.error('[RDB] Failed to connect to real-time service:', error);
+    }
+  }
+
+  /**
+   * Public accessor for ensureConfig (used by RdbTable.publish)
+   */
+  async ensureConfigPublic(): Promise<InternalConfig> {
+    return this.ensureConfig();
+  }
+
+  /**
+   * Get table metadata including GraphQL type name (used by RdbTable.publish)
+   * Note: Backend returns { tables: [...], count: N } format, same as listTables expects
+   */
+  async getTableMetadataPublic(tableName: string): Promise<{ graphqlTypeName?: string } | null> {
+    try {
+      // Backend returns the same format as listTables: { tables: [...], count: N }
+      const response = await this.apiClient.get('tables').json<{
+        tables: Array<{ tableName: string; graphqlTypeName?: string }>;
+        count: number;
+      }>();
+      
+      const table = response.tables?.find(t => t.tableName === tableName);
+      return table || null;
+    } catch (error) {
+      console.error('[RDB] Failed to get table metadata:', error);
+      return null;
     }
   }
 
@@ -702,9 +760,7 @@ export class RdbClient {
       
       // Wait for schema propagation to complete
       // This ensures resolvers and data sources are properly cleaned up
-      console.log('[RDB] Waiting for schema propagation after table deletion...');
       await new Promise(resolve => setTimeout(resolve, 8000)); // 8 seconds
-      console.log('[RDB] Schema propagation wait complete');
       
       // Transform backend response to match SDK expectations
       return {
@@ -1134,6 +1190,91 @@ export class RdbTable<T = any> {
   }
 
   /**
+   * Publish data directly to subscribers without writing to database
+   * This is optimized for real-time streaming where database persistence is not needed
+   * or is handled separately. Much faster than create/update (~50ms vs ~300ms)
+   * 
+   * @param data The data to publish to subscribers
+   * @returns Promise resolving to the published data
+   * 
+   * @example
+   * ```typescript
+   * // For streaming chat messages
+   * const messages = client.table<Message>('messages');
+   * await messages.publish({
+   *   messageId: 'msg-123',
+   *   content: 'Hello, world!',
+   *   status: 'streaming'
+   * });
+   * ```
+   */
+  async publish(data: Partial<T>): Promise<ApiResponse<T>> {
+    try {
+      // Ensure we have AppSync config
+      const config = await this.client.ensureConfigPublic();
+      
+      if (!config.appSyncEndpoint || !config.appSyncApiKey) {
+        throw new Error('AppSync configuration not available. Cannot publish.');
+      }
+
+      // Get table metadata to build the GraphQL type name
+      const tableMetadata = await this.client.getTableMetadataPublic(this.tableName);
+      if (!tableMetadata) {
+        throw new Error(`Table ${this.tableName} not found`);
+      }
+
+      const graphqlTypeName = tableMetadata.graphqlTypeName || this.capitalize(this.tableName);
+      
+      // Build the GraphQL mutation
+      const mutationName = `publish${graphqlTypeName}`;
+      const mutation = `
+        mutation Publish${graphqlTypeName}($input: ${graphqlTypeName}Input!) {
+          ${mutationName}(input: $input) {
+            ${Object.keys(data).join('\n            ')}
+          }
+        }
+      `;
+
+      // Call AppSync GraphQL endpoint directly
+      const response = await fetch(config.appSyncEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': config.appSyncApiKey,
+        },
+        body: JSON.stringify({
+          query: mutation,
+          variables: { input: data }
+        })
+      });
+
+      const result = await response.json() as { 
+        errors?: Array<{ message: string }>;
+        data?: Record<string, any>;
+      };
+
+      if (result.errors && result.errors.length > 0) {
+        const errorDetails = result.errors.map((e) => e.message).join(', ');
+        throw new Error(`GraphQL mutation failed: ${errorDetails}`);
+      }
+
+      return {
+        success: true,
+        data: result.data?.[mutationName] as T
+      };
+    } catch (error: any) {
+      throw new Error(`Failed to publish: ${error.message}`);
+    }
+  }
+
+  /**
+   * Capitalize first letter of a string
+   */
+  private capitalize(str: string): string {
+    return str.charAt(0).toUpperCase() + str.slice(1);
+  }
+
+  /**
    * Subscribe to real-time updates for this table
    * You must explicitly specify which event to listen to (create/update/delete)
    * 
@@ -1299,8 +1440,6 @@ export class RdbSubscription<T = any> {
     const variableDefinitions = filterArgs.length > 0 ? `(${filterArgs.join(', ')})` : '';
     const eventName = this.capitalize(this.options.event); // 'Create', 'Update', or 'Delete'
     
-    console.log(`[RDB] Subscribing to '${this.options.event}' event for table '${this.tableName}'`);
-    
     // Build the GraphQL subscription query as a string (no gql template literal)
     const subscriptionQuery = `
       subscription On${graphqlTypeName}${eventName}${variableDefinitions} {
@@ -1310,16 +1449,17 @@ export class RdbSubscription<T = any> {
       }
     `.trim();
 
-    console.log('[RDB] Generated subscription query:', subscriptionQuery);
-    console.log('[RDB] Subscription variables:', filterVariables);
+    // DEBUG: Log subscription setup
+    console.log(`[RDB-SUB] Setting up ${eventName} subscription for ${this.tableName}`);
+    console.log(`[RDB-SUB] Query: ${subscriptionQuery.substring(0, 200)}...`);
+    console.log(`[RDB-SUB] Variables:`, JSON.stringify(filterVariables));
 
     // Create subscription handler
     const handler: SubscriptionHandler<T> = {
       id: this.subscriptionId,
       query: subscriptionQuery,
       variables: filterVariables,
-      onData: (data: any) => {
-        console.log(`[RDB] Subscription data received for ${this.tableName}:`, data);
+      onData: (data: any) => { 
         if (this.options.onData) {
           // Look for the specific event field
           const eventName = this.capitalize(this.options.event);
@@ -1327,6 +1467,8 @@ export class RdbSubscription<T = any> {
           
           if (typedData) {
             this.options.onData(typedData as T);
+          } else {
+            console.warn(`[RDB-SUB] No data found for key on${graphqlTypeName}${eventName} in:`, Object.keys(data));
           }
         }
       },
@@ -1337,7 +1479,6 @@ export class RdbSubscription<T = any> {
         }
       },
       onComplete: () => {
-        console.log(`[RDB] Subscription completed for ${this.tableName}`);
         if (this.options.onComplete) {
           this.options.onComplete();
         }
@@ -1356,7 +1497,6 @@ export class RdbSubscription<T = any> {
   disconnect(): void {
     if (this.subscriptionId) {
       this.realtimeClient.stopSubscription(this.subscriptionId);
-      console.log(`Subscription disconnected for ${this.tableName}`);
       this.subscriptionId = null;
     }
   }

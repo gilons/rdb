@@ -369,6 +369,144 @@ app.delete('/tables/:tableName', async (c) => {
 });
 
 /**
+ * POST /tables/batch
+ * Create multiple tables in a single request
+ * This triggers schema generation only once after all tables are created
+ */
+app.post('/tables/batch', async (c) => {
+  const apiKeyHash = c.get('apiKeyHash') as string;
+
+  try {
+    const { tables } = await c.req.json<{ tables: TableConfig[] }>();
+
+    if (!tables || !Array.isArray(tables) || tables.length === 0) {
+      return c.json({ error: 'tables array is required and cannot be empty' }, 400);
+    }
+
+    // Validate all table configurations first
+    for (const tableConfig of tables) {
+      const { tableName, fields } = tableConfig;
+      
+      if (!tableName || !fields) {
+        return c.json({ error: `tableName and fields are required for each table. Invalid table: ${tableName || 'unnamed'}` }, 400);
+      }
+
+      if (!Array.isArray(fields) || fields.length === 0) {
+        return c.json({ error: `fields must be a non-empty array for table: ${tableName}` }, 400);
+      }
+    }
+
+    const createdTables: TableItem[] = [];
+    const errors: { tableName: string; error: string }[] = [];
+    const timestamp = new Date().toISOString();
+
+    // Create all tables
+    for (const tableConfig of tables) {
+      const { tableName, fields, subscriptions, description } = tableConfig;
+
+      try {
+        const tableId = uuidv4();
+        
+        // Generate GraphQL type name with prefix
+        const graphqlTypeName = `T${apiKeyHash}_${tableName}`;
+        
+        const tableItem: TableItem = {
+          apiKey: apiKeyHash,
+          tableName,
+          tableId,
+          fields: fields.map(field => ({
+            name: field.name,
+            type: field.type || 'String',
+            required: field.required || false,
+            indexed: field.indexed || false,
+            primary: field.primary || false,
+          })),
+          subscriptions: subscriptions || [],
+          description: description || '',
+          graphqlTypeName,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        };
+
+        // Save table metadata to DynamoDB
+        await putTable(tableItem, 'attribute_not_exists(tableName)');
+
+        // Create DynamoDB table for the actual data
+        const primaryKeyField = fields.find(f => f.primary) || fields[0];
+        
+        const keySchema = [
+          {
+            AttributeName: primaryKeyField.name,
+            KeyType: 'HASH' as const,
+          },
+        ];
+        
+        const attributeDefinitions = [
+          {
+            AttributeName: primaryKeyField.name,
+            AttributeType: getAttributeType(primaryKeyField.type),
+          },
+        ];
+
+        // Create Global Secondary Indexes for indexed fields
+        const indexedFields = fields.filter(f => f.indexed && !f.primary);
+        const globalSecondaryIndexes = indexedFields.map(field => {
+          attributeDefinitions.push({
+            AttributeName: field.name,
+            AttributeType: getAttributeType(field.type),
+          });
+
+          return {
+            IndexName: `${field.name}-index`,
+            KeySchema: [
+              {
+                AttributeName: field.name,
+                KeyType: 'HASH' as const,
+              },
+            ],
+            Projection: {
+              ProjectionType: 'ALL' as const,
+            },
+          };
+        });
+        
+        await createUserDataTable(tableId, keySchema, attributeDefinitions, globalSecondaryIndexes.length > 0 ? globalSecondaryIndexes : undefined);
+
+        createdTables.push(tableItem);
+        console.log(`Created table: ${tableName}`);
+      } catch (error: any) {
+        if (error.name === 'ConditionalCheckFailedException') {
+          errors.push({ tableName, error: 'Table already exists' });
+        } else {
+          errors.push({ tableName, error: error.message || 'Unknown error' });
+        }
+        console.error(`Failed to create table ${tableName}:`, error);
+      }
+    }
+
+    // Generate schema ONCE for all created tables
+    if (createdTables.length > 0) {
+      console.log(`Generating schema for ${createdTables.length} tables...`);
+      await generateAndStoreSchema(apiKeyHash);
+    }
+
+    return c.json({
+      message: `Batch table creation completed`,
+      created: createdTables.length,
+      failed: errors.length,
+      tables: createdTables,
+      errors: errors.length > 0 ? errors : undefined,
+    }, createdTables.length > 0 ? 201 : 400);
+  } catch (error) {
+    console.error('Error in batch table creation:', error);
+    return c.json({
+      error: 'Internal server error',
+      message: error instanceof Error ? error.message : 'Unknown error',
+    }, 500);
+  }
+});
+
+/**
  * Generate a consistent hash for API key (for logging and identification)
  */
 function getApiKeyHash(apiKey: string): string {

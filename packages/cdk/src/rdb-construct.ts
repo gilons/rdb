@@ -15,6 +15,19 @@ import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import { SqsEventSource } from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as path from 'path';
 
+import { TableConfig } from '../types';
+
+/**
+ * Initial table definition for CDK-based table creation
+ */
+export interface InitialTableConfig extends TableConfig {
+  /**
+   * Whether to skip this table if it already exists
+   * @default true
+   */
+  skipIfExists?: boolean;
+}
+
 /**
  * Configuration options for the RDB construct
  */
@@ -80,6 +93,41 @@ export interface RdbConstructProps {
    * @example 'dev' will create resources like rdb-tables-dev, rdb-api-keys-dev
    */
   resourceSuffix?: string;
+
+  /**
+   * Initial tables to create when the stack is deployed.
+   * These tables will be created automatically via a CloudFormation Custom Resource.
+   * Schema generation happens once after all tables are created.
+   * 
+   * @example
+   * initialTables: [
+   *   {
+   *     tableName: 'users',
+   *     fields: [
+   *       { name: 'id', type: 'String', primary: true },
+   *       { name: 'email', type: 'String', required: true, indexed: true },
+   *       { name: 'name', type: 'String' },
+   *     ],
+   *     subscriptions: [{ filters: [{ field: 'id', type: 'string' }] }],
+   *   },
+   *   {
+   *     tableName: 'messages',
+   *     fields: [
+   *       { name: 'id', type: 'String', primary: true },
+   *       { name: 'chatId', type: 'String', required: true, indexed: true },
+   *       { name: 'content', type: 'String', required: true },
+   *     ],
+   *   },
+   * ]
+   */
+  initialTables?: InitialTableConfig[];
+
+  /**
+   * API key to use for initial tables.
+   * If not provided, a default API key will be generated.
+   * This key is used to namespace the tables in AppSync schema.
+   */
+  initialTablesApiKey?: string;
 }
 
 /**
@@ -130,6 +178,17 @@ export class RdbConstruct extends Construct {
   public readonly apiKeySecret: secretsmanager.Secret;
 
   /**
+   * The provisioned API key for initial tables (if initialTables is provided)
+   * This key can be used by other resources to access the tables
+   */
+  public readonly provisionedApiKey?: string;
+
+  /**
+   * The provisioned API key ID
+   */
+  public readonly provisionedApiKeyId?: string;
+
+  /**
    * Lambda functions
    */
   public readonly tableManagementFunction: lambda.Function;
@@ -139,11 +198,18 @@ export class RdbConstruct extends Construct {
   public readonly tableDecommissionFunction: lambda.Function;
   public readonly authorizerFunction: lambda.Function;
   public readonly sdkConfigFunction: lambda.Function;
+  public readonly tableInitFunction?: lambda.Function;
+  public readonly apiKeyInitFunction?: lambda.Function;
 
   /**
    * The nested stack (if useNestedStack is true)
    */
   public readonly nestedStack?: cdk.NestedStack;
+
+  /**
+   * Custom resource for initial tables (if initialTables is provided)
+   */
+  public readonly tableInitCustomResource?: cdk.CustomResource;
 
   constructor(scope: Construct, id: string, props: RdbConstructProps = {}) {
     super(scope, id);
@@ -477,7 +543,8 @@ export class RdbConstruct extends Construct {
         `${this.appSyncApi.arn}/*`,
         `arn:aws:appsync:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:/v1/apis/${this.appSyncApi.apiId}`,
         `arn:aws:appsync:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:/v1/apis/${this.appSyncApi.apiId}/*`,
-        `arn:aws:appsync:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:/createdatasource`
+        `arn:aws:appsync:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:/createdatasource`,
+        `arn:aws:appsync:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:/updatedatasource`
       ],
     });
 
@@ -549,6 +616,12 @@ export class RdbConstruct extends Construct {
       authorizer,
     });
 
+    // Batch table creation endpoint
+    const batchResource = tablesResource.addResource('batch');
+    batchResource.addMethod('POST', new apigateway.LambdaIntegration(this.tableManagementFunction), {
+      authorizer,
+    });
+
     const tableResource = tablesResource.addResource('{tableName}');
     tableResource.addMethod('PUT', new apigateway.LambdaIntegration(this.tableManagementFunction), {
       authorizer,
@@ -608,6 +681,137 @@ export class RdbConstruct extends Construct {
     });
 
     s3ConfigChangeRule.addTarget(new targets.LambdaFunction(this.schemaSyncFunction));
+
+    // ========================================
+    // INITIAL TABLES (CDK Custom Resource)
+    // ========================================
+
+    if (props.initialTables && props.initialTables.length > 0) {
+      // Store reference to EventBridge rule for dependency
+      const eventBridgeRule = s3ConfigChangeRule;
+      
+      // ----------------------------------------
+      // Step 1: Create API Key Init Lambda
+      // ----------------------------------------
+      // This creates a real API key that can be used by SDK clients
+      
+      this.apiKeyInitFunction = new NodejsFunction(this, 'ApiKeyInitFunction', {
+        runtime: lambda.Runtime.NODEJS_LATEST,
+        functionName: resourceName('rdb-api-key-init'),
+        entry: path.join(__dirname, '../../lambdas/api-key-init/index.ts'),
+        handler: 'handler',
+        environment: {
+          API_KEYS_TABLE_NAME: this.apiKeysTable.tableName,
+          SECRET_NAME: this.apiKeySecret.secretName,
+        },
+        timeout: cdk.Duration.minutes(2),
+        logRetention,
+      });
+
+      // Grant permissions for API key creation
+      this.apiKeysTable.grantReadWriteData(this.apiKeyInitFunction);
+      this.apiKeySecret.grantRead(this.apiKeyInitFunction);
+      this.apiKeySecret.grantWrite(this.apiKeyInitFunction);
+
+      // Create API Key Custom Resource Provider
+      const apiKeyInitProvider = new cdk.custom_resources.Provider(this, 'ApiKeyInitProvider', {
+        onEventHandler: this.apiKeyInitFunction,
+        logRetention,
+      });
+
+      // Create the API Key Custom Resource
+      const apiKeyName = props.initialTablesApiKey || `rdb-init-${props.resourceSuffix || 'default'}`;
+      const apiKeyInitResource = new cdk.CustomResource(this, 'ApiKeyInitResource', {
+        serviceToken: apiKeyInitProvider.serviceToken,
+        properties: {
+          name: apiKeyName,
+          description: `Auto-provisioned API key for initial tables (${apiKeyName})`,
+          // Version to force re-creation if needed
+          version: '1',
+        },
+        removalPolicy: removalPolicy,
+      });
+
+      // Ensure API key is created after the tables/secrets exist
+      apiKeyInitResource.node.addDependency(this.apiKeysTable);
+      apiKeyInitResource.node.addDependency(this.apiKeySecret);
+
+      // Expose the provisioned API key
+      // Note: This will be available after deployment via stack outputs
+      (this as any).provisionedApiKey = apiKeyInitResource.getAttString('apiKey');
+      (this as any).provisionedApiKeyId = apiKeyInitResource.getAttString('apiKeyId');
+
+      // ----------------------------------------
+      // Step 2: Create Table Init Lambda
+      // ----------------------------------------
+
+      // Create the table init Lambda
+      this.tableInitFunction = new NodejsFunction(this, 'TableInitFunction', {
+        runtime: lambda.Runtime.NODEJS_LATEST,
+        functionName: resourceName('rdb-table-init'),
+        entry: path.join(__dirname, '../../lambdas/table-init/index.ts'),
+        handler: 'handler',
+        environment: {
+          TABLES_TABLE_NAME: this.tablesTable.tableName,
+          CONFIG_BUCKET_NAME: this.configBucket.bucketName,
+          APPSYNC_API_ID: this.appSyncApi.apiId,
+        },
+        timeout: cdk.Duration.minutes(10),
+        logRetention,
+      });
+
+      // Grant permissions
+      this.tablesTable.grantReadWriteData(this.tableInitFunction);
+      this.configBucket.grantReadWrite(this.tableInitFunction);
+      this.tableInitFunction.addToRolePolicy(dynamoDbPolicy);
+      this.tableInitFunction.addToRolePolicy(appSyncPolicy);
+
+      // Create Custom Resource Provider
+      const tableInitProvider = new cdk.custom_resources.Provider(this, 'TableInitProvider', {
+        onEventHandler: this.tableInitFunction,
+        logRetention,
+      });
+
+      // Create the Custom Resource - use the provisioned API key
+      this.tableInitCustomResource = new cdk.CustomResource(this, 'TableInitResource', {
+        serviceToken: tableInitProvider.serviceToken,
+        properties: {
+          tables: props.initialTables,
+          // Use the API key from the API key init resource
+          apiKey: apiKeyInitResource.getAttString('apiKey'),
+          // Add hash to detect config changes
+          configHash: cdk.Fn.base64(JSON.stringify(props.initialTables)),
+          // Version: bump this to force re-run of the custom resource
+          version: '3',
+        },
+        removalPolicy: removalPolicy,
+      });
+
+      // Ensure table init runs after API key is created
+      this.tableInitCustomResource.node.addDependency(apiKeyInitResource);
+      this.tableInitCustomResource.node.addDependency(this.tablesTable);
+      this.tableInitCustomResource.node.addDependency(this.configBucket);
+      this.tableInitCustomResource.node.addDependency(this.appSyncApi);
+      this.tableInitCustomResource.node.addDependency(this.schemaSyncFunction);
+      // Critical: Wait for EventBridge rule to be active before creating tables
+      // Otherwise S3 events won't trigger schema-sync during initial deployment
+      this.tableInitCustomResource.node.addDependency(eventBridgeRule);
+
+      // ----------------------------------------
+      // Output the provisioned API key
+      // ----------------------------------------
+      new cdk.CfnOutput(this, 'ProvisionedApiKey', {
+        value: apiKeyInitResource.getAttString('apiKey'),
+        description: 'Provisioned API key for SDK operations (store securely!)',
+        exportName: resourceName('rdb-provisioned-api-key'),
+      });
+
+      new cdk.CfnOutput(this, 'ProvisionedApiKeyId', {
+        value: apiKeyInitResource.getAttString('apiKeyId'),
+        description: 'Provisioned API key ID',
+        exportName: resourceName('rdb-provisioned-api-key-id'),
+      });
+    }
 
     // ========================================
     // OUTPUTS
