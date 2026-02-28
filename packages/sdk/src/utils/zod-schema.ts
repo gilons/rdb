@@ -128,9 +128,9 @@ export function createTableConfigFromSchema<T extends z.ZodRawShape>(
       const field = fields.find(f => f.name === fieldName);
       if (field) {
         field.indexed = true;
-        console.log(`[RDB] Field '${fieldName}' will be indexed for GSI`);
+        // Field indexed for GSI — no log needed
       } else {
-        console.warn(`[RDB] Warning: Indexed field '${fieldName}' not found in schema fields`);
+        console.error(`[RDB] Indexed field '${fieldName}' not found in schema fields`);
       }
     });
   }

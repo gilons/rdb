@@ -41,7 +41,7 @@ function getWebSocketImpl(): typeof WebSocket | null {
       const ws = require('ws');
       return ws;
     } catch (error) {
-      console.warn('[RDB] WebSocket not available. Install "ws" package for Node.js support: npm install ws');
+      console.error('[RDB] WebSocket not available. Install "ws" package for Node.js support: npm install ws');
     }
   }
   
@@ -494,7 +494,7 @@ export class RdbClient {
 
       return this.config;
     } catch (error: any) {
-      console.warn('[RDB] Failed to fetch SDK configuration. Real-time features will not be available.', error.message);
+      console.error('[RDB] Failed to fetch SDK configuration. Real-time features will not be available.', error.message);
       return this.config;
     }
   }
@@ -527,7 +527,7 @@ export class RdbClient {
     const { appSyncEndpoint, appSyncApiKey } = this.config;
 
     if (!appSyncEndpoint || !appSyncApiKey) {
-      console.warn('[RDB] Real-time configuration incomplete. Subscriptions will not be available.');
+      console.error('[RDB] Real-time configuration incomplete. Subscriptions will not be available.');
       return;
     }
 
@@ -1449,10 +1449,6 @@ export class RdbSubscription<T = any> {
       }
     `.trim();
 
-    // DEBUG: Log subscription setup
-    console.log(`[RDB-SUB] Setting up ${eventName} subscription for ${this.tableName}`);
-    console.log(`[RDB-SUB] Query: ${subscriptionQuery.substring(0, 200)}...`);
-    console.log(`[RDB-SUB] Variables:`, JSON.stringify(filterVariables));
 
     // Create subscription handler
     const handler: SubscriptionHandler<T> = {
@@ -1468,7 +1464,7 @@ export class RdbSubscription<T = any> {
           if (typedData) {
             this.options.onData(typedData as T);
           } else {
-            console.warn(`[RDB-SUB] No data found for key on${graphqlTypeName}${eventName} in:`, Object.keys(data));
+            console.error(`[RDB-SUB] No data found for key on${graphqlTypeName}${eventName} in:`, Object.keys(data));
           }
         }
       },
