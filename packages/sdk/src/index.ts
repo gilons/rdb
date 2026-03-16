@@ -41,7 +41,7 @@ function getWebSocketImpl(): typeof WebSocket | null {
       const ws = require('ws');
       return ws;
     } catch (error) {
-      console.error('[RDB] WebSocket not available. Install "ws" package for Node.js support: npm install ws');
+      rdbError('[RDB] WebSocket not available. Install "ws" package for Node.js support: npm install ws');
     }
   }
   
@@ -67,6 +67,14 @@ function base64Encode(str: string): string {
   }
   
   throw new Error('[RDB] No base64 encoding method available');
+}
+
+// Module-level debug flag — set by RdbClient constructor
+let _rdbDebug = false;
+
+/** Log only when debug mode is enabled */
+function rdbError(...args: any[]) {
+  if (_rdbDebug) console.error(...args);
 }
 
 // Real-time subscription message types
@@ -163,11 +171,11 @@ class RealtimeClient {
               this.reconnectAttempts = 0;
               resolve();
             } else if (message.type === 'connection_error') {
-              console.error('[RDB] Real-time connection error:', message.payload);
+              rdbError('[RDB] Real-time connection error:', message.payload);
               reject(new Error(JSON.stringify(message.payload)));
             }
           } catch (error) {
-            console.error('[RDB] Failed to parse WebSocket message:', error);
+            rdbError('[RDB] Failed to parse WebSocket message:', error);
           }
         };
 
@@ -181,7 +189,7 @@ class RealtimeClient {
         };
 
         this.ws.onerror = (error: any) => {
-          console.error('[RDB] Real-time WebSocket error:', error?.message || error);
+          rdbError('[RDB] Real-time WebSocket error:', error?.message || error);
           this.connectionState = 'disconnected';
           
           // Try a different approach if the first one fails
@@ -253,11 +261,11 @@ class RealtimeClient {
               this.reconnectAttempts = 0;
               resolve();
             } else if (message.type === 'connection_error') {
-              console.error('[RDB] Real-time connection error:', message.payload);
+              rdbError('[RDB] Real-time connection error:', message.payload);
               reject(new Error(JSON.stringify(message.payload)));
             }
           } catch (error) {
-            console.error('[RDB] Failed to parse WebSocket message:', error);
+            rdbError('[RDB] Failed to parse WebSocket message:', error);
           }
         };
 
@@ -266,7 +274,7 @@ class RealtimeClient {
         };
 
         this.ws.onerror = (error: any) => {
-          console.error('[RDB] Real-time WebSocket error:', error?.message || error);
+          rdbError('[RDB] Real-time WebSocket error:', error?.message || error);
           this.connectionState = 'disconnected';
           reject(error);
         };
@@ -295,7 +303,7 @@ class RealtimeClient {
         this.startSubscription(subscription);
       }
     } catch (error) {
-      console.error('[RDB] Reconnection failed:', error);
+      rdbError('[RDB] Reconnection failed:', error);
     }
   }
 
@@ -414,6 +422,7 @@ export class RdbClient {
   private configPromise: Promise<InternalConfig> | null = null;
 
   constructor(config: RdbConfig) {
+    _rdbDebug = config.debug ?? false;
     this.config = { ...config } as InternalConfig;
     this.clientId = `${config.endpoint}-${config.apiKey.substring(0, 8)}`;
     
@@ -494,7 +503,7 @@ export class RdbClient {
 
       return this.config;
     } catch (error: any) {
-      console.error('[RDB] Failed to fetch SDK configuration. Real-time features will not be available.', error.message);
+      rdbError('[RDB] Failed to fetch SDK configuration. Real-time features will not be available.', error.message);
       return this.config;
     }
   }
@@ -527,7 +536,7 @@ export class RdbClient {
     const { appSyncEndpoint, appSyncApiKey } = this.config;
 
     if (!appSyncEndpoint || !appSyncApiKey) {
-      console.error('[RDB] Real-time configuration incomplete. Subscriptions will not be available.');
+      rdbError('[RDB] Real-time configuration incomplete. Subscriptions will not be available.');
       return;
     }
 
@@ -538,7 +547,7 @@ export class RdbClient {
     try {
       await this.realtimeClient.connect();
     } catch (error) {
-      console.error('[RDB] Failed to connect to real-time service:', error);
+      rdbError('[RDB] Failed to connect to real-time service:', error);
     }
   }
 
@@ -564,7 +573,7 @@ export class RdbClient {
       const table = response.tables?.find(t => t.tableName === tableName);
       return table || null;
     } catch (error) {
-      console.error('[RDB] Failed to get table metadata:', error);
+      rdbError('[RDB] Failed to get table metadata:', error);
       return null;
     }
   }
@@ -1469,7 +1478,7 @@ export class RdbSubscription<T = any> {
         }
       },
       onError: (error: any) => {
-        console.error(`[RDB] Subscription error for ${this.tableName}:`, error);
+        rdbError(`[RDB] Subscription error for ${this.tableName}:`, error);
         if (this.options.onError) {
           this.options.onError(error);
         }

@@ -71,6 +71,9 @@ export interface RdbConfig {
   apiPrefix?: string;
   // Optional: Override automatic config fetching
   disableRealtime?: boolean;
+  // Optional: Enable console logging for debugging (default: false)
+  // When false, all [RDB] log messages are silently suppressed
+  debug?: boolean;
 }
 
 // Internal config fetched from API

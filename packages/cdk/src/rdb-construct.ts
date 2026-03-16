@@ -592,7 +592,7 @@ export class RdbConstruct extends Construct {
       restApiName: resourceName('rdb-api'),
       description: 'Realtime Database API',
       cloudWatchRole: enableApiLogging,
-      cloudWatchRoleRemovalPolicy: removalPolicy,
+      ...(enableApiLogging ? { cloudWatchRoleRemovalPolicy: removalPolicy } : {}),
       deployOptions: {
         stageName: 'prod',
         loggingLevel: enableApiLogging ? apigateway.MethodLoggingLevel.INFO : apigateway.MethodLoggingLevel.OFF,
