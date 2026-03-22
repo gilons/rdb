@@ -47,6 +47,8 @@ const client = new RdbClient({
   apiKey: 'your-api-key',
   // Optional: API route prefix (if your RDB API is mounted under a prefix)
   apiPrefix: 'v1', // or 'rdb', 'api/v1', etc.
+  // Optional: Cache TTL (seconds) for table metadata used by subscribe/publish/listTables
+  tableMetadataTtl: 60,
   // AppSync config is automatically fetched - no manual configuration needed
   disableRealtime: false, // Optional: Set to true to disable real-time features
 });
@@ -270,6 +272,8 @@ The main client class for interacting with the RDB service.
 |--------|------|----------|-------------|
 | `endpoint` | string | ✅ | Your API Gateway endpoint URL |
 | `apiKey` | string | ✅ | Your API key for authentication |
+| `apiPrefix` | string | ❌ | Optional API route prefix (for example `rdb` or `v1`) |
+| `tableMetadataTtl` | number | ❌ | Cache TTL in seconds for table metadata (defaults to `60`; set `0` to disable) |
 | `disableRealtime` | boolean | ❌ | Disable real-time subscriptions (defaults to false) |
 
 > **Note**: AppSync configuration for real-time subscriptions is automatically fetched from your API endpoint. You no longer need to provide AppSync credentials manually.
@@ -405,6 +409,7 @@ For security reasons, the SDK automatically fetches AppSync configuration (endpo
 - ✅ **No exposed credentials** - AppSync details aren't exposed in client code
 - ✅ **Automatic updates** - Configuration changes are automatically picked up
 - ✅ **Intelligent caching** - Configuration is cached locally with TTL for performance
+- ✅ **Table metadata caching** - `listTables` requests are cached + in-flight deduped to reduce repeated `/tables` calls
 - ✅ **Graceful fallback** - If real-time features fail, HTTP operations continue working
 
 ### Configuration Caching
@@ -417,6 +422,8 @@ client.config.disableRealtime = true;
 // Re-enable to fetch fresh config
 client.config.disableRealtime = false;
 ```
+
+Table metadata used by `listTables`, `subscribe`, and `publish` is also cached for 60 seconds by default. You can tune this with `tableMetadataTtl` (seconds), or set it to `0` to disable table metadata caching.
 
 ### Network Requirements
 

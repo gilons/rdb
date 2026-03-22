@@ -69,6 +69,9 @@ export interface RdbConfig {
   region?: string;
   // Optional: API route prefix (e.g., 'v1', 'rdb', 'api/v1')
   apiPrefix?: string;
+  // Optional: TTL (in seconds) for table metadata cache used by listTables/subscribe/publish
+  // Defaults to 60 seconds
+  tableMetadataTtl?: number;
   // Optional: Override automatic config fetching
   disableRealtime?: boolean;
   // Optional: Enable console logging for debugging (default: false)

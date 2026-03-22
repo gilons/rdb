@@ -413,6 +413,7 @@ class RealtimeClient {
 
 // Real-time WebSocket client instances
 const realtimeClientInstances = new Map<string, RealtimeClient>();
+const DEFAULT_TABLE_METADATA_TTL_SECONDS = 60;
 
 export class RdbClient {
   private apiClient: KyInstance;
@@ -420,11 +421,23 @@ export class RdbClient {
   private config: InternalConfig;
   private clientId: string;
   private configPromise: Promise<InternalConfig> | null = null;
+  private tablesCache: { fetchedAt: number; data: PaginatedResponse<TableConfig> } | null = null;
+  private tablesPromise: Promise<ApiResponse<PaginatedResponse<TableConfig>>> | null = null;
+  private readonly tableMetadataTtlMs: number;
 
   constructor(config: RdbConfig) {
     _rdbDebug = config.debug ?? false;
     this.config = { ...config } as InternalConfig;
     this.clientId = `${config.endpoint}-${config.apiKey.substring(0, 8)}`;
+    const configuredTableMetadataTtl = config.tableMetadataTtl;
+    const tableMetadataTtlSeconds = (
+      typeof configuredTableMetadataTtl === 'number' &&
+      Number.isFinite(configuredTableMetadataTtl) &&
+      configuredTableMetadataTtl >= 0
+    )
+      ? configuredTableMetadataTtl
+      : DEFAULT_TABLE_METADATA_TTL_SECONDS;
+    this.tableMetadataTtlMs = tableMetadataTtlSeconds * 1000;
     
     // Build the prefix URL with optional API prefix
     const prefixUrl = config.apiPrefix 
@@ -564,18 +577,25 @@ export class RdbClient {
    */
   async getTableMetadataPublic(tableName: string): Promise<{ graphqlTypeName?: string } | null> {
     try {
-      // Backend returns the same format as listTables: { tables: [...], count: N }
-      const response = await this.apiClient.get('tables').json<{
-        tables: Array<{ tableName: string; graphqlTypeName?: string }>;
-        count: number;
-      }>();
-      
-      const table = response.tables?.find(t => t.tableName === tableName);
+      const response = await this.listTables();
+      const table = response.data?.items?.find(t => t.tableName === tableName);
       return table || null;
     } catch (error) {
       rdbError('[RDB] Failed to get table metadata:', error);
       return null;
     }
+  }
+
+  private isTablesCacheFresh(): boolean {
+    if (!this.tablesCache || this.tableMetadataTtlMs <= 0) {
+      return false;
+    }
+    return Date.now() - this.tablesCache.fetchedAt < this.tableMetadataTtlMs;
+  }
+
+  private invalidateTablesCache(): void {
+    this.tablesCache = null;
+    this.tablesPromise = null;
   }
 
   /**
@@ -642,6 +662,7 @@ export class RdbClient {
   async createTable(config: TableConfig): Promise<ApiResponse> {
     try {
       const response = await this.apiClient.post('tables', { json: config }).json<{ message: string, table: any }>();
+      this.invalidateTablesCache();
       // Transform backend response to match SDK expectations
       return {
         success: true,
@@ -729,19 +750,44 @@ export class RdbClient {
    * ```
    */
   async listTables(): Promise<ApiResponse<PaginatedResponse<TableConfig>>> {
-    try {
-      const response = await this.apiClient.get('tables').json<{ tables: TableConfig[], count: number }>();
-      // Transform backend response to match SDK expectations
+    if (this.isTablesCacheFresh()) {
       return {
         success: true,
-        data: {
-          items: response.tables,
-          count: response.count
-        }
+        data: this.tablesCache!.data,
       };
-    } catch (error: any) {
-      throw new Error(`Failed to list tables: ${error.response?.data?.error || error.message}`);
     }
+
+    if (this.tablesPromise) {
+      return this.tablesPromise;
+    }
+
+    this.tablesPromise = (async () => {
+      try {
+        const response = await this.apiClient.get('tables').json<{ tables: TableConfig[], count: number }>();
+        const transformed: ApiResponse<PaginatedResponse<TableConfig>> = {
+          success: true,
+          data: {
+            items: response.tables,
+            count: response.count
+          }
+        };
+
+        if (this.tableMetadataTtlMs > 0 && transformed.data) {
+          this.tablesCache = {
+            fetchedAt: Date.now(),
+            data: transformed.data,
+          };
+        }
+
+        return transformed;
+      } catch (error: any) {
+        throw new Error(`Failed to list tables: ${error.response?.data?.error || error.message}`);
+      } finally {
+        this.tablesPromise = null;
+      }
+    })();
+
+    return this.tablesPromise;
   }
 
   /**
@@ -750,6 +796,7 @@ export class RdbClient {
   async updateTable(tableName: string, updates: Partial<TableConfig>): Promise<ApiResponse> {
     try {
       const response = await this.apiClient.put(`tables/${tableName}`, { json: updates }).json<{ message: string }>();
+      this.invalidateTablesCache();
       // Transform backend response to match SDK expectations
       return {
         success: true,
@@ -766,6 +813,7 @@ export class RdbClient {
   async deleteTable(tableName: string): Promise<ApiResponse> {
     try {
       const response = await this.apiClient.delete(`tables/${tableName}`).json<{ message: string }>();
+      this.invalidateTablesCache();
       
       // Wait for schema propagation to complete
       // This ensures resolvers and data sources are properly cleaned up
