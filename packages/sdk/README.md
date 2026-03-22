@@ -272,7 +272,6 @@ The main client class for interacting with the RDB service.
 |--------|------|----------|-------------|
 | `endpoint` | string | ✅ | Your API Gateway endpoint URL |
 | `apiKey` | string | ✅ | Your API key for authentication |
-| `apiPrefix` | string | ❌ | Optional API route prefix (for example `rdb` or `v1`) |
 | `tableMetadataTtl` | number | ❌ | Cache TTL in seconds for table metadata (defaults to `60`; set `0` to disable) |
 | `disableRealtime` | boolean | ❌ | Disable real-time subscriptions (defaults to false) |
 
